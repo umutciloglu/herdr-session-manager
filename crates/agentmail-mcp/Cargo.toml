@@ -1,0 +1,28 @@
+[package]
+name = "agentmail-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "agentmail MCP stdio server: tools, resources, Claude channel notifications"
+
+[features]
+default = []
+herdr = ["dep:herdr-client", "agentmail-delivery/herdr"]
+
+[dependencies]
+agentmail-core = { path = "../agentmail-core" }
+agentmail-delivery = { path = "../agentmail-delivery" }
+herdr-client = { path = "../herdr-client", optional = true }
+async-trait = "0.1"
+chrono.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

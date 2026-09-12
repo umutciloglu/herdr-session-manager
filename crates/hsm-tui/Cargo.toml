@@ -1,0 +1,15 @@
+[package]
+name = "hsm-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Session browser popup for hsm"
+
+[dependencies]
+chrono.workspace = true
+crossterm.workspace = true
+hsm-core = { path = "../hsm-core" }
+ratatui.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

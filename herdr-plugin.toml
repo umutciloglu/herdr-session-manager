@@ -1,0 +1,78 @@
+# herdr-plugin.toml — manifest for herdr-session-manager.
+#
+# Everything here is available right after `herdr plugin install`. Agent chat needs
+# harness-side setup (MCP registration and hooks in Claude Code / Codex), which is a
+# user decision, so it lives behind the explicit `setup-chat` action instead of the
+# build step. Build commands run without a terminal, so they cannot ask.
+#
+# Windows: herdr cannot spawn a manifest pane whose command is a relative path (it
+# resolves against herdr's own directory), so the Windows launchers open a normal
+# split pane by absolute path instead of the popup. Same behaviour, different shape.
+
+id = "herdr-session-manager"
+name = "Session Manager"
+version = "0.1.0"
+description = "Browse, search, restore and open agent sessions; optional cross-harness agent chat."
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+platforms = ["linux", "macos"]
+command = ["/bin/sh", "scripts/fetch-or-build.sh"]
+
+[[build]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/fetch-or-build.ps1"]
+
+# One-shot after herdr restores the session: snapshot pane->session refs and refresh the index.
+[[startup]]
+platforms = ["linux", "macos"]
+command = ["./target/release/hsm", "startup"]
+
+[[startup]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/startup.ps1"]
+
+[[panes]]
+id = "browser"
+title = "Sessions"
+placement = "popup"
+width = "85%"
+height = "80%"
+command = ["./target/release/hsm", "browse"]
+
+[[panes]]
+id = "chat-setup"
+title = "Agent chat setup"
+placement = "popup"
+width = "70%"
+height = "70%"
+command = ["./target/release/hsm", "setup-chat"]
+
+[[actions]]
+id = "browse"
+platforms = ["linux", "macos"]
+title = "Browse agent sessions"
+description = "Search past and live agent sessions; open one in this pane, a split, or a tab."
+command = ["/bin/sh", "scripts/browse.sh"]
+
+[[actions]]
+id = "browse-windows"
+platforms = ["windows"]
+title = "Browse agent sessions"
+description = "Search past and live agent sessions; open one in this pane, a split, or a tab."
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/browse.ps1"]
+
+[[actions]]
+id = "setup-chat"
+platforms = ["linux", "macos"]
+title = "Set up agent chat"
+description = "Install or remove the agentmail MCP server and hooks in Claude Code and Codex."
+command = ["/bin/sh", "scripts/setup-chat.sh"]
+
+[[actions]]
+id = "setup-chat-windows"
+platforms = ["windows"]
+title = "Set up agent chat"
+description = "Install or remove the agentmail MCP server and hooks in Claude Code and Codex."
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/setup-chat.ps1"]

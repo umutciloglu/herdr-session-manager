@@ -1,0 +1,38 @@
+[package]
+name = "agentmail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Cross-harness agent-to-agent messaging: MCP server, hooks and CLI"
+
+[[bin]]
+name = "agentmail"
+path = "src/main.rs"
+
+[features]
+default = ["herdr"]
+herdr = ["dep:herdr-client", "agentmail-mcp/herdr", "agentmail-delivery/herdr"]
+
+[dependencies]
+agentmail-core = { path = "../agentmail-core" }
+agentmail-delivery = { path = "../agentmail-delivery" }
+agentmail-mcp = { path = "../agentmail-mcp" }
+herdr-client = { path = "../herdr-client", optional = true }
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+dirs.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+# preserve_order keeps a user's ~/.claude.json and settings.json in the order they
+# wrote them: this binary edits those files in place.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "agentmail-delivery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "agentmail delivery adapters: harness hooks, pokes, spawning, herdr"
+
+[features]
+default = []
+herdr = ["dep:herdr-client"]
+
+[dependencies]
+agentmail-core = { path = "../agentmail-core" }
+herdr-client = { path = "../herdr-client", optional = true }
+async-trait = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

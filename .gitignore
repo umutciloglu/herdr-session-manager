@@ -1,0 +1,14 @@
+# build output
+/target
+# local runtime state that tests or manual runs may leave behind
+*.sqlite
+*.sqlite-*
+*.log
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+# the file-viewer plugin pattern keeps a downloaded prebuilt here; keep it out of git
+/dist
