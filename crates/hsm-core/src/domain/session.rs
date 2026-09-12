@@ -62,6 +62,10 @@ pub struct ProcessRef {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The herdr pane whose interactive agent is currently showing this job,
+    /// matched by title; `None` when nobody is looking at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,9 +152,18 @@ impl Session {
     }
 
     /// Alive in any form: a herdr pane, or a process of its own. Jumping still
-    /// needs a pane, so it asks `is_live`.
+    /// needs a pane, so it asks `jump_pane`.
     pub fn is_running(&self) -> bool {
         self.is_live() || self.process.is_some()
+    }
+
+    /// The pane `Enter` focuses: this session's own live pane, or the pane
+    /// where someone is watching it run as a job. `None` opens instead.
+    pub fn jump_pane(&self) -> Option<&str> {
+        match self.last_pane.as_ref() {
+            Some(p) if p.live => Some(&p.pane_id),
+            _ => self.process.as_ref()?.pane_id.as_deref(),
+        }
     }
 }
 
@@ -267,6 +280,10 @@ pub struct ProcessCard {
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The pane showing this job, so a reader can focus it instead of opening
+    /// a session that is already on someone's screen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
 }
 
 impl From<&ProcessRef> for ProcessCard {
@@ -276,6 +293,7 @@ impl From<&ProcessRef> for ProcessCard {
             kind: p.kind.as_str().to_string(),
             status: p.status.clone(),
             name: p.name.clone(),
+            pane_id: p.pane_id.clone(),
         }
     }
 }
@@ -375,21 +393,48 @@ mod tests {
             kind: ProcessKind::Job,
             status: Some("busy".into()),
             name: Some("herdr search session linking".into()),
+            pane_id: None,
         });
         assert!(s.is_running(), "a process with no pane still runs");
         assert!(!s.is_live(), "but there is nothing to jump to");
+        assert_eq!(s.jump_pane(), None);
 
         let card = SessionCard::from(&s);
         let process = card.process.as_ref().expect("process");
         assert_eq!(process.pid, 57845);
         assert_eq!(process.kind, "job");
         assert_eq!(process.status.as_deref(), Some("busy"));
+        assert_eq!(process.pane_id, None);
 
         let json = serde_json::to_string(&card).expect("json");
         assert!(
             json.contains(r#""process":{"pid":57845,"kind":"job""#),
             "{json}"
         );
+        assert!(!json.contains("pane_id"), "{json}");
+
+        // Someone is watching the job from their own pane: that pane is what
+        // Enter focuses, even though the job process has none of its own.
+        s.process = Some(ProcessRef {
+            pane_id: Some("w9:p7".into()),
+            ..s.process.clone().expect("process")
+        });
+        assert_eq!(s.jump_pane(), Some("w9:p7"));
+        assert_eq!(
+            SessionCard::from(&s)
+                .process
+                .and_then(|p| p.pane_id)
+                .as_deref(),
+            Some("w9:p7")
+        );
+
+        // A pane of its own still wins.
+        s.last_pane = Some(PaneRef {
+            pane_id: "w6:p1".into(),
+            live: true,
+            ..PaneRef::default()
+        });
+        assert_eq!(s.jump_pane(), Some("w6:p1"));
     }
 
     #[test]

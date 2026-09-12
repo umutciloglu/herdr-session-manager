@@ -43,6 +43,25 @@ pub(crate) fn session(harness: &str, id: &str, project: &str, title: &str) -> Se
     s
 }
 
+/// A job nobody has on screen: no pane of its own, and no pane showing it, so
+/// `Enter` has nowhere to jump.
+pub(crate) fn unwatched_job() -> Session {
+    let mut s = session(
+        "claude",
+        "9c2f77b0-4f2a-4c1e-8f0d-2b6c1d9a5e33",
+        "flip-to-screen",
+        "nightly sweep",
+    );
+    s.process = Some(ProcessRef {
+        pid: 57846,
+        kind: ProcessKind::Job,
+        status: Some("busy".into()),
+        name: Some("nightly sweep".into()),
+        pane_id: None,
+    });
+    s
+}
+
 #[derive(Default)]
 pub(crate) struct Fake {
     pub sessions: Vec<Session>,
@@ -77,7 +96,8 @@ impl Fake {
             status: Some("idle".into()),
         });
 
-        // A background job: running, but in a process of its own with no pane.
+        // A background job: a process of its own with no pane, but an
+        // interactive Claude in w9:p7 has it on screen.
         let mut old = session(
             "claude",
             "43901a13-7735-465b-9e08-86e55b01c4c5",
@@ -89,6 +109,7 @@ impl Fake {
             kind: ProcessKind::Job,
             status: Some("busy".into()),
             name: Some("fold animation".into()),
+            pane_id: Some("w9:p7".into()),
         });
 
         let mut gone = session(
@@ -100,8 +121,13 @@ impl Fake {
         gone.tier = Tier::Gone;
         gone.transcript_present = false;
 
+        Fake::with_rows(vec![live, old, gone])
+    }
+
+    /// Exactly these rows, for a test the standard three do not cover.
+    pub fn with_rows(sessions: Vec<Session>) -> Fake {
         Fake {
-            sessions: vec![live, old, gone],
+            sessions,
             ..Fake::default()
         }
     }
@@ -168,11 +194,7 @@ impl Actions for Fake {
     }
 
     fn jump(&self, session: &Session) -> Result<JumpReport> {
-        let pane_id = session
-            .last_pane
-            .as_ref()
-            .map(|p| p.pane_id.clone())
-            .unwrap_or_default();
+        let pane_id = session.jump_pane().unwrap_or_default().to_string();
         record(format!("jump({}, {pane_id})", session.address().short()));
         if self.jump_fails {
             return Err(Error::Action("no such pane".into()));

@@ -69,7 +69,9 @@ Letters act after `Esc`, or with `Alt` held while typing. `c` is refused when yo
 
 Row glyphs: `@` live idle, `>` working, `!` blocked, `~` running with no pane, `+` recent, `-` older, `x` transcript gone, `*` pinned. A row whose agent is running in herdr right now also carries a `live` tag; `Enter` on one of those focuses that pane instead of starting a second copy. If the pane has closed since the popup opened, it opens the session instead.
 
-A `~` row is alive but has nowhere to jump: a Claude Code background job (`claude --bg`, `/jobs`) or a Claude running in a terminal outside herdr, tagged `job` and `run` respectively. `Enter` opens the session rather than focusing a pane. Only Claude publishes such a registry (`~/.claude/sessions`); a Codex process outside herdr is invisible to hsm.
+A `~` row is alive in a process of its own: a Claude Code background job (`claude --bg`, `/jobs`) or a Claude running in a terminal outside herdr, tagged `job` and `run` respectively. Only Claude publishes such a registry (`~/.claude/sessions`); a Codex process outside herdr is invisible to hsm.
+
+A job has no pane, but the interactive Claude watching one puts the job's name in its terminal title, so hsm matches that title against the job name and `Enter` jumps to that pane — the preview says which (`57845 job busy in pane w9:p7`). A job nobody is viewing opens instead.
 
 A session marked gone opens a fresh agent in the same directory. Claude Code deletes transcripts after its `cleanupPeriodDays` setting, 30 days by default.
 

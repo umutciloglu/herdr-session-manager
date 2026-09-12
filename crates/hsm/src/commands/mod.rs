@@ -71,6 +71,7 @@ mod tests {
             kind: ProcessKind::Job,
             status: Some("busy".into()),
             name: None,
+            pane_id: None,
         });
         assert_eq!(state_word(&s), "job");
         s.process = Some(hsm_core::ProcessRef {

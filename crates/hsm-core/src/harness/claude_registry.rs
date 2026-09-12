@@ -84,6 +84,9 @@ pub fn running(dir: &Path) -> Vec<RunningRef> {
                 },
                 status: e.status,
                 name: e.name,
+                // Filled by the refresh, which is the only pass that sees the
+                // herdr panes alongside the registry.
+                pane_id: None,
             },
         });
     }

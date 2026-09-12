@@ -292,6 +292,7 @@ mod tests {
             kind: ProcessKind::Job,
             status: Some("busy".into()),
             name: None,
+            pane_id: None,
         });
         let idx = index_with(&[session("cold", "demo", "auth middleware", 200)]);
         idx.upsert(&running, SOURCE_TRANSCRIPT).expect("upsert");

@@ -401,13 +401,14 @@ impl App {
         }
     }
 
-    /// A live session already runs somewhere, so the useful thing is to be put
-    /// in front of it rather than to start a second copy.
+    /// A session that is already on screen somewhere — in its own pane, or in
+    /// the pane of whoever is watching it run as a job — is worth being put in
+    /// front of rather than started a second time.
     fn jump_or_open(&mut self) {
         let Some(session) = self.selected_session().cloned() else {
             return self.warn("nothing selected");
         };
-        if !session.is_live() {
+        if session.jump_pane().is_none() {
             return self.open(self.ctx.default_open);
         }
         match self.actions.jump(&session) {
@@ -423,11 +424,7 @@ impl App {
                 // The live flag is only as fresh as the popup: the pane may have
                 // closed a second ago, and opening is still what was asked for.
                 tracing::debug!(%error, "cannot focus the pane this session ran in");
-                let pane = session
-                    .last_pane
-                    .as_ref()
-                    .map(|p| p.pane_id.clone())
-                    .unwrap_or_default();
+                let pane = session.jump_pane().unwrap_or_default().to_string();
                 self.open(self.ctx.default_open);
                 // Why the row said live but a new pane appeared. A failed open
                 // has its own error to show instead.
@@ -873,7 +870,7 @@ fn filters_for(sessions: &[Session]) -> Vec<Option<HarnessKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{ask_app, fake_app, key, keys_app, log, session, Fake};
+    use crate::testing::{ask_app, fake_app, key, keys_app, log, session, unwatched_job, Fake};
 
     #[test]
     fn starts_in_search_mode_with_recent_sessions() {
@@ -957,8 +954,28 @@ mod tests {
     fn enter_on_a_row_that_is_not_live_opens_as_before() {
         let mut app = fake_app(Fake::with_sessions());
         app.on_key(key_code(KeyCode::Down));
+        app.on_key(key_code(KeyCode::Down));
         app.on_key(key_code(KeyCode::Enter));
-        assert_eq!(log(), vec!["open(claude:43901a13, split-horizontal)"]);
+        assert_eq!(log(), vec!["open(codex:01a08ad8, split-horizontal)"]);
+    }
+
+    /// The job has no pane, but the pane watching it does, and that is where
+    /// the person asking for it wants to end up.
+    #[test]
+    fn enter_on_a_job_focuses_the_pane_that_is_showing_it() {
+        let mut app = fake_app(Fake::with_sessions());
+        app.on_key(key_code(KeyCode::Down));
+        app.on_key(key_code(KeyCode::Enter));
+        assert_eq!(log(), vec!["jump(claude:43901a13, w9:p7)"]);
+        assert_eq!(app.status().text, "claude:43901a13 focused in pane w9:p7");
+        assert!(app.should_exit());
+    }
+
+    #[test]
+    fn enter_on_a_job_nobody_is_watching_opens_it() {
+        let mut app = fake_app(Fake::with_rows(vec![unwatched_job()]));
+        app.on_key(key_code(KeyCode::Enter));
+        assert_eq!(log(), vec!["open(claude:9c2f77b0, split-horizontal)"]);
     }
 
     #[test]

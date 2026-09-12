@@ -131,14 +131,13 @@ impl Actions for TuiActions {
             .as_ref()
             .ok_or_else(|| Error::Action(NO_HERDR.into()))?;
         let pane = session
-            .last_pane
-            .as_ref()
+            .jump_pane()
             .ok_or_else(|| Error::Action("session has no pane to jump to".into()))?;
         self.handle
-            .block_on(client.pane_focus(&pane.pane_id))
+            .block_on(client.pane_focus(pane))
             .map_err(Error::action)?;
         Ok(JumpReport {
-            pane_id: pane.pane_id.clone(),
+            pane_id: pane.to_string(),
         })
     }
 

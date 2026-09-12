@@ -55,7 +55,7 @@ Reload with `herdr server reload-config`.
 
 ## First five minutes
 
-**Sessions.** Press `prefix+s`. Type to filter. Enter jumps to the pane a live session already runs in, and opens the session in a split when nothing is running it. `Esc` switches from typing to keys: `o` or `v` split right, `d` split down, `t` new tab, `c` this pane, `i` paste the session's address into your pane. `s`, `a`, `r` jump between the search, ask, and replies panels.
+**Sessions.** Press `prefix+s`. Type to filter. Enter jumps to the pane a live session runs in, or to the pane showing a background job, and opens the session in a split when there is no pane. `Esc` switches from typing to keys: `o` or `v` split right, `d` split down, `t` new tab, `c` this pane, `i` paste the session's address into your pane. `s`, `a`, `r` jump between the search, ask, and replies panels.
 
 **Chat, one-time setup.** Run `agentmail setup` in a terminal, or press `prefix+shift+s`. It is a checklist: arrows move, space toggles, `a` selects everything, Enter applies. It registers the MCP server and installs Stop and SessionStart hooks in Claude Code and Codex. Codex asks once whether to trust the new hooks.
 

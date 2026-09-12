@@ -240,10 +240,13 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     }
     if let Some(process) = &s.process {
         let status = process.status.clone().unwrap_or_default();
-        lines.push(field(
-            "process",
-            format!("{} {} {status}", process.pid, process.kind).trim_end(),
-        ));
+        let head = format!("{} {} {status}", process.pid, process.kind);
+        // Where Enter will land: the pane of whoever is watching the job.
+        let watched = match &process.pane_id {
+            Some(pane) => format!(" in pane {pane}"),
+            None => String::new(),
+        };
+        lines.push(field("process", format!("{}{watched}", head.trim_end())));
     }
     lines.push(field(
         "transcript",
@@ -692,7 +695,7 @@ mod tests {
         ));
         let frame = draw(&mut app, 100, 24).join("\n");
         assert!(frame.contains("~   job "), "{frame}");
-        assert!(frame.contains("57845 job busy"), "{frame}");
+        assert!(frame.contains("57845 job busy in pane w9:p7"), "{frame}");
     }
 
     #[test]
@@ -764,6 +767,7 @@ mod tests {
             kind: hsm_core::ProcessKind::Job,
             status: Some("busy".into()),
             name: None,
+            pane_id: None,
         });
         let job = text_of(&row(&s, 20, now));
         assert!(job.starts_with("~   job  "), "{job:?}");

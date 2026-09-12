@@ -28,10 +28,10 @@ See docs/PLAN.md "agentmail-mcp". Tool names: `agentmail_send`, `agentmail_reply
 `agentmail` can call an external command to search sessions it does not know about. Default `["hsm", "sessions", "--json"]`. Contract: stdin unused; args appended: `--query <q> --limit <n> [--harness <h>] [--project <p>]`; stdout JSON:
 
 ```json
-{"sessions":[{"address":"claude:8890a685-...","harness":"claude","project":"trade-help","cwd":"/abs/path","title":"API authentication","started":"2026-09-10T08:00:00Z","last_active":"2026-09-12T07:55:00Z","first_prompt":"...","transcript_path":"/abs/path.jsonl","resumable":true,"pane":{"pane_id":"w6:p1","workspace_id":"w6","tab_id":"w6:t1","live":true,"status":"idle"},"process":{"pid":57845,"kind":"job","status":"busy","name":"fold animation"}}]}
+{"sessions":[{"address":"claude:8890a685-...","harness":"claude","project":"trade-help","cwd":"/abs/path","title":"API authentication","started":"2026-09-10T08:00:00Z","last_active":"2026-09-12T07:55:00Z","first_prompt":"...","transcript_path":"/abs/path.jsonl","resumable":true,"pane":{"pane_id":"w6:p1","workspace_id":"w6","tab_id":"w6:t1","live":true,"status":"idle"},"process":{"pid":57845,"kind":"job","status":"busy","name":"fold animation","pane_id":"w9:p7"}}]}
 ```
 
-`pane` is the herdr pane the session last ran in. `process` is a Claude Code process running it with no pane at all — `kind` is `job` (a background job) or `interactive`. Both are present only when they apply, and both describe the last refresh, not the stored row.
+`pane` is the herdr pane the session last ran in. `process` is a Claude Code process running it with no pane of its own — `kind` is `job` (a background job) or `interactive`. `process.pane_id` is the pane whose interactive agent is showing that job right now, matched by pane title, and is the pane to focus for it. All are present only when they apply, and all describe the last refresh, not the stored row.
 
 Exit code non-zero or malformed output = provider unavailable; agentmail degrades to registry + directory.
 

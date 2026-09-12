@@ -5,7 +5,7 @@ use std::time::Instant;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::domain::{project_of, HarnessKind, PaneRef, Session};
+use crate::domain::{project_of, HarnessKind, PaneRef, ProcessKind, Session};
 use crate::error::Result;
 use crate::harness::claude_registry::{self, RunningRef};
 use crate::harness::herdr_refs::{self, HerdrRef};
@@ -15,7 +15,7 @@ use crate::index::{
     to_millis, upsert_session, Index, LAST_REFRESH_KEY, SOURCE_HERDR, SOURCE_REGISTRY,
     SOURCE_TRANSCRIPT,
 };
-use crate::live::LiveSessions;
+use crate::live::{LivePane, LiveSessions};
 use crate::paths;
 
 pub struct RefreshOptions<'a> {
@@ -114,8 +114,11 @@ impl Index {
             }
         }
 
-        for pane in opts.live.live() {
-            let r = HerdrRef::from(&pane);
+        // Taken once: the registry pass below needs the same snapshot to work
+        // out which pane is showing which job.
+        let live_panes = opts.live.live();
+        for pane in &live_panes {
+            let r = HerdrRef::from(pane);
             if !opts.enabled(&r.session.harness) {
                 continue;
             }
@@ -125,7 +128,8 @@ impl Index {
 
         if opts.enabled(&HarnessKind::Claude) {
             if let Some(dir) = registry_dir(opts) {
-                for r in claude_registry::running(&dir) {
+                for mut r in claude_registry::running(&dir) {
+                    r.process.pane_id = pane_showing(&r, &live_panes);
                     upsert_process(&tx, &r)?;
                     report.processes_seen += 1;
                 }
@@ -390,6 +394,22 @@ fn registry_dir(opts: &RefreshOptions<'_>) -> Option<PathBuf> {
     }
 }
 
+/// The pane whose interactive agent is showing this job right now. While a
+/// Claude displays a job the cli writes the job's name into the terminal title,
+/// which herdr reports back as the pane title, so an exact match is the pane to
+/// jump to. Only jobs are matched, and never against a pane running the job's
+/// own session id: a job that was resumed interactively would otherwise be
+/// found looking at itself.
+fn pane_showing(job: &RunningRef, live: &[LivePane]) -> Option<String> {
+    if job.process.kind != ProcessKind::Job {
+        return None;
+    }
+    let name = job.process.name.as_deref()?;
+    live.iter()
+        .find(|p| p.title.as_deref() == Some(name) && p.session.value != job.session_id)
+        .map(|p| p.pane_id.clone())
+}
+
 /// The process is a snapshot, so this only ever writes `process_json`. The row
 /// itself is created when the registry is the first place we hear of a session
 /// — a job that has not written a transcript yet.
@@ -516,8 +536,8 @@ fn mark_gone(conn: &Connection) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ProcessKind, RefKind, SessionRef, Tier};
-    use crate::live::{LivePane, LiveSessions, NoLive};
+    use crate::domain::{RefKind, SessionRef, Tier};
+    use crate::live::NoLive;
 
     struct FakeLive(Vec<LivePane>);
 
@@ -823,6 +843,79 @@ mod tests {
             .expect("row")
             .process
             .is_none());
+    }
+
+    /// A pane showing a job, as herdr reports it: the interactive agent's
+    /// terminal title is the job's name while the job is on screen.
+    fn watching_pane(pane_id: &str, session_id: &str, title: &str) -> LivePane {
+        LivePane {
+            pane_id: pane_id.into(),
+            workspace_id: Some("w9".into()),
+            tab_id: Some("w9:t1".into()),
+            agent: "claude".into(),
+            session: SessionRef {
+                harness: HarnessKind::Claude,
+                kind: RefKind::Id,
+                value: session_id.into(),
+            },
+            cwd: PathBuf::from("/Users/x/Projects/demo"),
+            title: Some(title.into()),
+            status: "working".into(),
+        }
+    }
+
+    #[test]
+    fn a_job_is_linked_to_the_pane_whose_title_is_its_name() {
+        let registry = fixture_registry(&[("job-1", "bg"), ("run-1", "interactive")]);
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut idx = Index::open(&dir.path().join("index.sqlite")).expect("open");
+        let roots: Vec<PathBuf> = Vec::new();
+        let refresh = |idx: &mut Index, live: &FakeLive| {
+            let opts = RefreshOptions {
+                disabled: &[HarnessKind::Codex],
+                store_roots_override: Some(&roots),
+                registry_dir_override: Some(registry.path()),
+                ..RefreshOptions::new(live)
+            };
+            idx.refresh(&opts).expect("refresh");
+        };
+
+        let live = FakeLive(vec![
+            watching_pane("w9:p7", "2c36e684-watching", "a background job"),
+            watching_pane("w9:p9", "1f0b1d55-elsewhere", "something else"),
+        ]);
+        refresh(&mut idx, &live);
+
+        let job = idx.get(None, "job-1").expect("get").expect("row");
+        assert_eq!(
+            job.process.as_ref().expect("process").pane_id.as_deref(),
+            Some("w9:p7")
+        );
+        assert_eq!(job.jump_pane(), Some("w9:p7"), "Enter goes to the watcher");
+
+        // Same name, but a person is already typing at it: an interactive
+        // process is not something a pane can be showing.
+        let run = idx.get(None, "run-1").expect("get").expect("row");
+        assert_eq!(run.process.expect("process").pane_id, None);
+
+        // A job resumed in a pane of its own is listed first, so only the id
+        // check keeps it from matching itself.
+        let live = FakeLive(vec![
+            watching_pane("w9:p8", "job-1", "a background job"),
+            watching_pane("w9:p7", "2c36e684-watching", "a background job"),
+        ]);
+        refresh(&mut idx, &live);
+        let job = idx.get(None, "job-1").expect("get").expect("row");
+        assert_eq!(
+            job.process.expect("process").pane_id.as_deref(),
+            Some("w9:p7")
+        );
+
+        // Nobody is watching any more.
+        let live = FakeLive(vec![watching_pane("w9:p8", "job-1", "a background job")]);
+        refresh(&mut idx, &live);
+        let job = idx.get(None, "job-1").expect("get").expect("row");
+        assert_eq!(job.process.expect("process").pane_id, None);
     }
 
     /// The provider skips a scan that just happened, so the stamp has to
