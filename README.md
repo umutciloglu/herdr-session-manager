@@ -2,6 +2,8 @@
 
 Session browsing and agent-to-agent chat for people who run many AI coding agents inside [herdr](https://herdr.dev).
 
+> **Early work in progress.** Version 0.1 was built and tested on one machine, macOS with Claude Code and Codex. It works there end to end, but other transcript layouts, harness versions, and workflows have not been exercised yet. Expect rough edges, keep an eye on the [issues](https://github.com/umutciloglu/herdr-session-manager/issues), and please report what breaks. macOS and Linux only for now.
+
 herdr already restores your agent panes after a restart. This plugin adds the parts around that:
 
 - **Find any session again.** Every Claude Code and Codex session you ever ran, plus the sessions herdr knows for every other harness, in one searchable popup. Open one in the current pane, a split, or a new tab.
