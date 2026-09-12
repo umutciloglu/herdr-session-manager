@@ -5,33 +5,23 @@
 # user decision, so it lives behind the explicit `setup-chat` action instead of the
 # build step. Build commands run without a terminal, so they cannot ask.
 #
-# Windows: herdr cannot spawn a manifest pane whose command is a relative path (it
-# resolves against herdr's own directory), so the Windows launchers open a normal
-# split pane by absolute path instead of the popup. Same behaviour, different shape.
+# Windows is not listed yet: nothing has been built or run there. The PowerShell
+# launchers under scripts/ are kept for when it is.
 
 id = "herdr-session-manager"
 name = "Session Manager"
 version = "0.1.0"
 description = "Browse, search, restore and open agent sessions; optional cross-harness agent chat."
 min_herdr_version = "0.9.0"
-platforms = ["linux", "macos", "windows"]
+platforms = ["linux", "macos"]
 
 [[build]]
 platforms = ["linux", "macos"]
 command = ["/bin/sh", "scripts/fetch-or-build.sh"]
 
-[[build]]
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/fetch-or-build.ps1"]
-
-# One-shot after herdr restores the session: snapshot pane->session refs and refresh the index.
 [[startup]]
 platforms = ["linux", "macos"]
 command = ["./target/release/hsm", "startup"]
-
-[[startup]]
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/startup.ps1"]
 
 [[panes]]
 id = "browser"
@@ -65,25 +55,11 @@ description = "Search past and live agent sessions; open one in this pane, a spl
 command = ["/bin/sh", "scripts/browse.sh"]
 
 [[actions]]
-id = "browse-windows"
-platforms = ["windows"]
-title = "Browse agent sessions"
-description = "Search past and live agent sessions; open one in this pane, a split, or a tab."
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/browse.ps1"]
-
-[[actions]]
 id = "ask"
 platforms = ["linux", "macos"]
 title = "Ask an agent session"
 description = "Pick a past or live agent session and send it a question; the answer comes back to you."
 command = ["/bin/sh", "scripts/ask.sh"]
-
-[[actions]]
-id = "ask-windows"
-platforms = ["windows"]
-title = "Ask an agent session"
-description = "Pick a past or live agent session and send it a question; the answer comes back to you."
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/ask.ps1"]
 
 [[actions]]
 id = "setup-chat"
@@ -92,9 +68,3 @@ title = "Set up agent chat"
 description = "Install or remove the agentmail MCP server and hooks in Claude Code and Codex."
 command = ["/bin/sh", "scripts/setup-chat.sh"]
 
-[[actions]]
-id = "setup-chat-windows"
-platforms = ["windows"]
-title = "Set up agent chat"
-description = "Install or remove the agentmail MCP server and hooks in Claude Code and Codex."
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/setup-chat.ps1"]

@@ -114,6 +114,10 @@ fetch_prebuilt() {
 
 fetch_prebuilt || build_from_source
 
+# Opt-out for people who manage PATH themselves: the plugin still works, herdr runs
+# the binaries by their manifest paths; only `hsm` and `agentmail` by name are lost.
+[ "${HSM_NO_PATH:-0}" = "1" ] && exit 0
+
 # --- put the binaries on PATH ---------------------------------------------------
 # Symlinks, not copies, so a rebuild updates them in place. ~/.local/bin is the
 # conventional per-user bin dir; when it is not on PATH yet, one guarded line goes
