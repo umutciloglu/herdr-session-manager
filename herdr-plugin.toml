@@ -10,7 +10,7 @@
 
 id = "herdr-session-manager"
 name = "Session Manager"
-version = "0.1.0"
+version = "0.1.1"
 description = "Browse, search, restore and open agent sessions; optional cross-harness agent chat."
 min_herdr_version = "0.9.0"
 platforms = ["linux", "macos"]
