@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use hsm_core::{HarnessKind, OpenMethod, OpenTarget, Session, SplitDirection};
+use hsm_core::{HarnessKind, KeyBinding, Keys, OpenMethod, OpenTarget, Session, SplitDirection};
 
 use crate::actions::{Actions, BrowseContext, Panel, ReplyRow, Sent};
 
@@ -179,6 +179,11 @@ impl App {
         self.panel
     }
 
+    /// The configured keys, so the footer names what actually works.
+    pub fn keys(&self) -> &Keys {
+        &self.ctx.keys
+    }
+
     /// Mail the human has not been shown yet.
     pub fn unseen(&self) -> usize {
         self.replies.iter().filter(|r| !r.seen).count()
@@ -299,6 +304,15 @@ impl App {
     }
 
     fn browse_key(&mut self, key: KeyEvent) {
+        // Configured keys are matched before the fixed ones, so rebinding onto
+        // a built-in letter really moves the action.
+        if self.panel == Panel::Search && binds(&self.ctx.keys.jump, &key, self.mode) {
+            return self.jump_or_open();
+        }
+        if binds(&self.ctx.keys.open_split, &key, self.mode) {
+            return self.open(OpenTarget::Split(SplitDirection::Horizontal));
+        }
+
         match key.code {
             KeyCode::Up => return self.move_by(-1),
             KeyCode::Down => return self.move_by(1),
@@ -384,6 +398,44 @@ impl App {
                 self.message.push(c);
             }
             _ => {}
+        }
+    }
+
+    /// A live session already runs somewhere, so the useful thing is to be put
+    /// in front of it rather than to start a second copy.
+    fn jump_or_open(&mut self) {
+        let Some(session) = self.selected_session().cloned() else {
+            return self.warn("nothing selected");
+        };
+        if !session.is_live() {
+            return self.open(self.ctx.default_open);
+        }
+        match self.actions.jump(&session) {
+            Ok(report) => {
+                self.info(format!(
+                    "{} focused in pane {}",
+                    session.address().short(),
+                    report.pane_id
+                ));
+                self.exit = true;
+            }
+            Err(error) => {
+                // The live flag is only as fresh as the popup: the pane may have
+                // closed a second ago, and opening is still what was asked for.
+                tracing::debug!(%error, "cannot focus the pane this session ran in");
+                let pane = session
+                    .last_pane
+                    .as_ref()
+                    .map(|p| p.pane_id.clone())
+                    .unwrap_or_default();
+                self.open(self.ctx.default_open);
+                // Why the row said live but a new pane appeared. A failed open
+                // has its own error to show instead.
+                if !self.status.error {
+                    let opened = self.status.text.clone();
+                    self.info(format!("pane {pane} is gone; {opened}"));
+                }
+            }
         }
     }
 
@@ -668,7 +720,8 @@ impl App {
         }
     }
 
-    /// Enter: open, ask, or read the selected reply, by panel.
+    /// Enter: open, ask, or read the selected reply, by panel. Jumping is not
+    /// here: it belongs to `keys.jump`, which is `Enter` until it is rebound.
     fn activate(&mut self) {
         match self.panel {
             Panel::Search => self.open(self.ctx.default_open),
@@ -789,6 +842,19 @@ impl App {
     }
 }
 
+/// Does this event fire that binding? A bound letter follows the same rule as
+/// the built-in ones: in the search box it types, and only Alt reaches the
+/// action. `Enter` and `Tab` act in both modes.
+fn binds(binding: &KeyBinding, key: &KeyEvent, mode: Mode) -> bool {
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match *binding {
+        KeyBinding::Enter => key.code == KeyCode::Enter,
+        KeyBinding::Tab => key.code == KeyCode::Tab,
+        KeyBinding::Char(c) => key.code == KeyCode::Char(c) && (alt || mode == Mode::Normal),
+        KeyBinding::AltChar(c) => key.code == KeyCode::Char(c) && alt,
+    }
+}
+
 /// all → claude → codex → every other kind the index actually holds. Claude and
 /// codex stay in the cycle even when empty; they are the two we always index.
 fn filters_for(sessions: &[Session]) -> Vec<Option<HarnessKind>> {
@@ -807,7 +873,7 @@ fn filters_for(sessions: &[Session]) -> Vec<Option<HarnessKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{ask_app, fake_app, key, log, session, Fake};
+    use crate::testing::{ask_app, fake_app, key, keys_app, log, session, Fake};
 
     #[test]
     fn starts_in_search_mode_with_recent_sessions() {
@@ -875,6 +941,107 @@ mod tests {
 
         app.on_key(key('v'));
         assert_eq!(log(), vec!["open(claude:8890a685, split-horizontal)"]);
+    }
+
+    #[test]
+    fn enter_on_a_live_row_focuses_its_pane_instead_of_opening_a_second_copy() {
+        let mut app = fake_app(Fake::with_sessions());
+        app.on_key(key_code(KeyCode::Enter));
+        assert_eq!(log(), vec!["jump(claude:8890a685, w6:p1)"]);
+        assert_eq!(app.status().text, "claude:8890a685 focused in pane w6:p1");
+        assert!(!app.status().error);
+        assert!(app.should_exit());
+    }
+
+    #[test]
+    fn enter_on_a_row_that_is_not_live_opens_as_before() {
+        let mut app = fake_app(Fake::with_sessions());
+        app.on_key(key_code(KeyCode::Down));
+        app.on_key(key_code(KeyCode::Enter));
+        assert_eq!(log(), vec!["open(claude:43901a13, split-horizontal)"]);
+    }
+
+    #[test]
+    fn a_pane_that_closed_since_the_refresh_opens_instead() {
+        let mut fake = Fake::with_sessions();
+        fake.jump_fails = true;
+        let mut app = fake_app(fake);
+        app.on_key(key_code(KeyCode::Enter));
+        assert_eq!(
+            log(),
+            vec![
+                "jump(claude:8890a685, w6:p1)",
+                "open(claude:8890a685, split-horizontal)"
+            ]
+        );
+        assert_eq!(
+            app.status().text,
+            "pane w6:p1 is gone; claude:8890a685 in pane w1:p9 (agent.start)"
+        );
+        assert!(!app.status().error);
+        assert!(app.should_exit());
+    }
+
+    #[test]
+    fn o_splits_right_and_types_while_the_box_is_open() {
+        let mut app = fake_app(Fake::with_sessions());
+        app.on_key(key('o'));
+        assert_eq!(app.query(), "o");
+        assert!(log().is_empty());
+
+        app.on_key(key_code(KeyCode::Esc));
+        app.on_key(key('o'));
+        assert_eq!(log(), vec!["open(claude:8890a685, split-horizontal)"]);
+    }
+
+    #[test]
+    fn a_configured_key_wins_over_the_built_in_letter() {
+        let keys = Keys {
+            jump: KeyBinding::Char('v'),
+            ..Keys::default()
+        };
+        let mut app = keys_app(Fake::with_sessions(), keys);
+        app.on_key(key_code(KeyCode::Esc));
+        app.on_key(key('v'));
+        assert_eq!(log(), vec!["jump(claude:8890a685, w6:p1)"]);
+    }
+
+    #[test]
+    fn rebinding_open_split_moves_the_key() {
+        let keys = Keys {
+            open_split: KeyBinding::Char('z'),
+            ..Keys::default()
+        };
+        let mut app = keys_app(Fake::with_sessions(), keys);
+        app.on_key(key_code(KeyCode::Esc));
+        app.on_key(key('o'));
+        assert!(log().is_empty(), "o is not an action any more");
+
+        app.on_key(key('z'));
+        assert_eq!(log(), vec!["open(claude:8890a685, split-horizontal)"]);
+    }
+
+    #[test]
+    fn rebinding_jump_takes_it_off_enter() {
+        let keys = Keys {
+            jump: KeyBinding::AltChar('g'),
+            ..Keys::default()
+        };
+        let mut app = keys_app(Fake::with_sessions(), keys);
+        app.on_key(key_code(KeyCode::Enter));
+        assert_eq!(log(), vec!["open(claude:8890a685, split-horizontal)"]);
+    }
+
+    #[test]
+    fn an_alt_bound_key_acts_without_leaving_the_search_box() {
+        let keys = Keys {
+            jump: KeyBinding::AltChar('g'),
+            ..Keys::default()
+        };
+        let mut app = keys_app(Fake::with_sessions(), keys);
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+        assert_eq!(log(), vec!["jump(claude:8890a685, w6:p1)"]);
+        assert!(app.query().is_empty(), "alt never types");
     }
 
     #[test]
@@ -1056,6 +1223,8 @@ mod tests {
     fn an_open_failure_is_shown_and_the_popup_stays() {
         let mut fake = Fake::with_sessions();
         fake.open_fails = true;
+        // The first row is live, so the fallback has to fail too.
+        fake.jump_fails = true;
         let mut app = fake_app(fake);
         app.on_key(key_code(KeyCode::Enter));
         assert!(app.status().error);

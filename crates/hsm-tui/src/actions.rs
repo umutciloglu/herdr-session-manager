@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use hsm_core::{HarnessKind, OpenReport, OpenTarget, Session};
+use hsm_core::{HarnessKind, Keys, OpenReport, OpenTarget, Session};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -45,6 +45,13 @@ pub trait Actions {
 
     fn open(&self, session: &Session, target: OpenTarget) -> Result<OpenReport>;
 
+    /// Focus the herdr pane that runs this session. Only meaningful for a live
+    /// row.
+    fn jump(&self, session: &Session) -> Result<JumpReport> {
+        let _ = session;
+        Err(Error::Action("jumping is not available here".into()))
+    }
+
     /// Type `<harness>:<id8> ` into the pane the popup was invoked from.
     fn insert_address(&self, session: &Session) -> Result<()>;
 
@@ -82,6 +89,12 @@ pub trait Actions {
     fn can_message(&self) -> bool {
         false
     }
+}
+
+/// The pane a jump put the user in front of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JumpReport {
+    pub pane_id: String,
 }
 
 /// What a question turned into.
@@ -157,6 +170,8 @@ pub struct BrowseContext {
     pub start_panel: Panel,
     /// How long to watch for an answer (`ask_wait_secs`).
     pub ask_wait: Duration,
+    /// The rebindable browser keys, so the screen can both match and name them.
+    pub keys: Keys,
     /// Who the question goes out as, for the screen to show. Sends are always
     /// from the human, never from the agent in the invoking pane: a reply
     /// addressed to that agent would be injected into it instead of reaching
@@ -172,6 +187,7 @@ impl Default for BrowseContext {
             default_open: OpenTarget::default(),
             start_panel: Panel::default(),
             ask_wait: Duration::from_secs(120),
+            keys: Keys::default(),
             sender_note: None,
         }
     }

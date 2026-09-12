@@ -28,7 +28,7 @@ See docs/PLAN.md "agentmail-mcp". Tool names: `agentmail_send`, `agentmail_reply
 `agentmail` can call an external command to search sessions it does not know about. Default `["hsm", "sessions", "--json"]`. Contract: stdin unused; args appended: `--query <q> --limit <n> [--harness <h>] [--project <p>]`; stdout JSON:
 
 ```json
-{"sessions":[{"address":"claude:8890a685-...","harness":"claude","project":"trade-help","cwd":"/abs/path","title":"API authentication","started":"2026-09-10T08:00:00Z","last_active":"2026-09-12T07:55:00Z","first_prompt":"...","transcript_path":"/abs/path.jsonl","resumable":true}]}
+{"sessions":[{"address":"claude:8890a685-...","harness":"claude","project":"trade-help","cwd":"/abs/path","title":"API authentication","started":"2026-09-10T08:00:00Z","last_active":"2026-09-12T07:55:00Z","first_prompt":"...","transcript_path":"/abs/path.jsonl","resumable":true,"pane":{"pane_id":"w6:p1","workspace_id":"w6","tab_id":"w6:t1","live":true,"status":"idle"}}]}
 ```
 
 Exit code non-zero or malformed output = provider unavailable; agentmail degrades to registry + directory.

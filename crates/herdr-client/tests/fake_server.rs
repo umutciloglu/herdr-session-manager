@@ -415,6 +415,15 @@ async fn pane_input_helpers() {
 }
 
 #[tokio::test]
+async fn pane_focus_names_the_pane() {
+    let fake = Fake::spawn(|req| ok(req, json!({ "type": "ok" })));
+
+    fake.client().await.pane_focus("w6:p1").await.expect("pane");
+    assert_eq!(fake.last_method(), "pane.focus");
+    assert_eq!(fake.last_params(), json!({ "pane_id": "w6:p1" }));
+}
+
+#[tokio::test]
 async fn pane_current_and_read() {
     let fake = Fake::spawn(|req| {
         let method = req

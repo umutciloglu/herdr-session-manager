@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hsm_core::{
-    HarnessKind, OpenMethod, OpenReport, OpenTarget, PaneRef, Session, SplitDirection, Tier,
+    HarnessKind, Keys, OpenMethod, OpenReport, OpenTarget, PaneRef, Session, SplitDirection, Tier,
 };
 
-use crate::actions::{Actions, BrowseContext, Error, Panel, ReplyRow, Result, Sent};
+use crate::actions::{Actions, BrowseContext, Error, JumpReport, Panel, ReplyRow, Result, Sent};
 use crate::app::App;
 
 thread_local! {
@@ -47,6 +47,8 @@ pub(crate) struct Fake {
     pub sessions: Vec<Session>,
     pub agentmail: bool,
     pub open_fails: bool,
+    /// The pane herdr no longer has, so a jump has to fall back to opening.
+    pub jump_fails: bool,
     /// What `ask` reports about the peer being able to answer right now.
     pub awaiting: bool,
     /// Poll number that finally carries the answer, if any.
@@ -157,6 +159,19 @@ impl Actions for Fake {
         })
     }
 
+    fn jump(&self, session: &Session) -> Result<JumpReport> {
+        let pane_id = session
+            .last_pane
+            .as_ref()
+            .map(|p| p.pane_id.clone())
+            .unwrap_or_default();
+        record(format!("jump({}, {pane_id})", session.address().short()));
+        if self.jump_fails {
+            return Err(Error::Action("no such pane".into()));
+        }
+        Ok(JumpReport { pane_id })
+    }
+
     fn insert_address(&self, session: &Session) -> Result<()> {
         record(format!("insert({})", session.address().short()));
         Ok(())
@@ -226,6 +241,11 @@ pub(crate) fn ask_app(fake: Fake) -> App {
 
 /// A popup opened from a plain shell pane: `c` is allowed, nothing is running.
 pub(crate) fn fake_app(fake: Fake) -> App {
+    keys_app(fake, Keys::default())
+}
+
+/// The same popup with the browser keys rebound.
+pub(crate) fn keys_app(fake: Fake, keys: Keys) -> App {
     LOG.with(|l| l.borrow_mut().clear());
     App::new(
         Box::new(fake),
@@ -234,6 +254,7 @@ pub(crate) fn fake_app(fake: Fake) -> App {
             invoking_pane_has_agent: false,
             default_open: OpenTarget::Split(SplitDirection::Horizontal),
             start_panel: Panel::Search,
+            keys,
             ..BrowseContext::default()
         },
     )

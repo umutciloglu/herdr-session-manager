@@ -190,6 +190,35 @@ pub struct SessionCard {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
     pub resumable: bool,
+    /// The herdr pane this session last ran in, when we know of one. A reader
+    /// can focus it instead of starting a second copy of the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane: Option<PaneCard>,
+}
+
+/// [`PaneRef`] as it goes over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneCard {
+    pub pane_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    pub live: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+impl From<&PaneRef> for PaneCard {
+    fn from(p: &PaneRef) -> Self {
+        PaneCard {
+            pane_id: p.pane_id.clone(),
+            workspace_id: p.workspace_id.clone(),
+            tab_id: p.tab_id.clone(),
+            live: p.live,
+            status: p.status.clone(),
+        }
+    }
 }
 
 impl From<&Session> for SessionCard {
@@ -209,6 +238,7 @@ impl From<&Session> for SessionCard {
                 .map(|p| p.to_string_lossy().into_owned()),
             // A Gone session cannot be resumed, only restarted in its old cwd.
             resumable: s.tier != Tier::Gone && crate::harness::registry::is_resumable(&s.harness),
+            pane: s.last_pane.as_ref().map(PaneCard::from),
         }
     }
 }
@@ -240,6 +270,26 @@ mod tests {
             "trade-help"
         );
         assert_eq!(project_of(Path::new("/")), "");
+    }
+
+    #[test]
+    fn a_card_carries_the_pane_only_when_there_is_one() {
+        let mut s = Session::new(HarnessKind::Claude, "abc", "/tmp/proj");
+        assert_eq!(SessionCard::from(&s).pane, None);
+        let json = serde_json::to_string(&SessionCard::from(&s)).expect("json");
+        assert!(!json.contains("pane"), "{json}");
+
+        s.last_pane = Some(PaneRef {
+            pane_id: "w6:p1".into(),
+            workspace_id: Some("w6".into()),
+            tab_id: Some("w6:t1".into()),
+            live: true,
+            status: Some("idle".into()),
+        });
+        let pane = SessionCard::from(&s).pane.expect("pane");
+        assert_eq!(pane.pane_id, "w6:p1");
+        assert_eq!(pane.workspace_id.as_deref(), Some("w6"));
+        assert!(pane.live);
     }
 
     #[test]

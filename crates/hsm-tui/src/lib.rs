@@ -12,6 +12,6 @@ pub mod ui;
 #[cfg(test)]
 mod testing;
 
-pub use actions::{Actions, BrowseContext, Error, Panel, ReplyRow, Result, Sent};
+pub use actions::{Actions, BrowseContext, Error, JumpReport, Panel, ReplyRow, Result, Sent};
 pub use app::{App, Mode, Reply, Status};
 pub use run::run;

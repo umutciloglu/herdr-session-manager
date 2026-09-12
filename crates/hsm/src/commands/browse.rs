@@ -50,6 +50,7 @@ fn screen(ctx: &Ctx, pane_mode: bool, start_panel: Panel) -> Result<()> {
         default_open: ctx.config.default_open,
         start_panel,
         ask_wait: Duration::from_secs(ctx.config.ask_wait_secs),
+        keys: ctx.config.keys.clone(),
         sender_note: Some(sender_note(
             ctx,
             client.as_ref(),

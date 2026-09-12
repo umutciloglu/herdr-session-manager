@@ -223,6 +223,13 @@ impl HerdrClient {
         Ok(())
     }
 
+    /// Focuses the pane, bringing its tab and workspace forward with it.
+    pub async fn pane_focus(&self, pane_id: &str) -> Result<()> {
+        self.request("pane.focus", json!({ "pane_id": pane_id }))
+            .await?;
+        Ok(())
+    }
+
     /// Without `caller_pane_id` this returns whatever herdr currently focuses.
     pub async fn pane_current(&self, caller_pane_id: Option<&str>) -> Result<PaneInfo> {
         self.call(

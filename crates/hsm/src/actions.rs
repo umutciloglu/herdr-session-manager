@@ -11,7 +11,7 @@ use herdr_client::HerdrClient;
 use hsm_core::{
     HarnessKind, Index, OpenContext, OpenReport, OpenService, OpenTarget, Query, Session,
 };
-use hsm_tui::actions::{Actions, Error, ReplyRow, Result, Sent};
+use hsm_tui::actions::{Actions, Error, JumpReport, ReplyRow, Result, Sent};
 use tokio::runtime::Handle;
 
 use crate::herdr_adapter::HerdrPaneOps;
@@ -123,6 +123,23 @@ impl Actions for TuiActions {
         self.handle
             .block_on(service.open(session, target, &ctx))
             .map_err(Error::action)
+    }
+
+    fn jump(&self, session: &Session) -> Result<JumpReport> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Action(NO_HERDR.into()))?;
+        let pane = session
+            .last_pane
+            .as_ref()
+            .ok_or_else(|| Error::Action("session has no pane to jump to".into()))?;
+        self.handle
+            .block_on(client.pane_focus(&pane.pane_id))
+            .map_err(Error::action)?;
+        Ok(JumpReport {
+            pane_id: pane.pane_id.clone(),
+        })
     }
 
     fn insert_address(&self, session: &Session) -> Result<()> {

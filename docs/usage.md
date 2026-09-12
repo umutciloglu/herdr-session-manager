@@ -49,7 +49,8 @@ Search panel:
 
 | Key | Action |
 | --- | --- |
-| `Enter` | open with the default target |
+| `Enter` | jump to the live pane, otherwise open with the default target (the `jump` key; rebindable) |
+| `o` | open in split right (same as `v`; rebindable) |
 | `v` `d` `t` `c` | open in split right, split down, new tab, current pane |
 | `i` | insert the session address into your pane, then close |
 | `m` | send a one-line message to the selected session |
@@ -66,7 +67,7 @@ the list, `a` answers its sender on the ask panel.
 
 Letters act after `Esc`, or with `Alt` held while typing. `c` is refused when your pane already runs an agent.
 
-Row glyphs: `@` live idle, `>` working, `!` blocked, `+` recent, `-` older, `x` transcript gone, `*` pinned.
+Row glyphs: `@` live idle, `>` working, `!` blocked, `+` recent, `-` older, `x` transcript gone, `*` pinned. A row whose agent is running in herdr right now also carries a `live` tag; `Enter` on one of those focuses that pane instead of starting a second copy. If the pane has closed since the popup opened, it opens the session instead.
 
 A session marked gone opens a fresh agent in the same directory. Claude Code deletes transcripts after its `cleanupPeriodDays` setting, 30 days by default.
 
@@ -89,7 +90,13 @@ disabled_harnesses = []       # e.g. ["codex"]
 extra_transcript_roots = []   # extra Claude project dirs
 default_open = "split"        # current | split | split-down | tab
 agentmail_bin = "agentmail"   # or an absolute path
+
+[keys]
+jump = "enter"                # enter | tab | a letter | alt-<letter>
+open_split = "o"
 ```
+
+Letters type into the search box until you press `Esc`; `alt-<letter>` acts anywhere. A configured key wins over the built-in one with the same letter. Jumping lives on the `jump` key alone, so `Enter` jumps only while `jump = "enter"`, the default; bind it elsewhere and `Enter` goes back to plain opening.
 
 Index and state live in `~/.local/state/hsm`.
 

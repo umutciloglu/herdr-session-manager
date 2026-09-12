@@ -2,7 +2,7 @@
 //! only the renderer knows (it depends on the window height).
 
 use chrono::{DateTime, Local, Utc};
-use hsm_core::{Session, Tier};
+use hsm_core::{KeyBinding, Keys, Session, Tier};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -15,8 +15,13 @@ use crate::app::{App, Mode, COMPOSE_MAX};
 const HARNESS_W: usize = 7;
 const PROJECT_W: usize = 12;
 const AGE_W: usize = 5;
-/// glyph + pin + harness + project + age, each with a trailing space.
-const FIXED_W: usize = 2 + 2 + HARNESS_W + 1 + PROJECT_W + 1 + AGE_W + 1;
+/// Wide enough for the word itself; blank on rows that are not running.
+const LIVE_W: usize = 4;
+/// glyph + pin + live + harness + project + age, each with a trailing space.
+const FIXED_W: usize = 2 + 2 + LIVE_W + 1 + HARNESS_W + 1 + PROJECT_W + 1 + AGE_W + 1;
+/// The row glyphs, spelled out under the panel row.
+const LEGEND: &str =
+    "@ live idle · > live working · ! live blocked · + hot · - warm · x gone · * pinned";
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     if app.panel() == Panel::Replies {
@@ -40,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Constraint::Min(1),
         Constraint::Length(if composing { 3 } else { 0 }),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(hints_height(app)),
     ])
     .areas(frame.area());
     let [left, right] =
@@ -114,6 +119,12 @@ fn row(s: &Session, title_w: usize, now: DateTime<Utc>) -> Line<'static> {
         Span::styled(
             if s.pinned { "*" } else { " " }.to_string(),
             Style::new().fg(Color::Yellow),
+        ),
+        Span::raw(" "),
+        // The glyph alone is a puzzle the first few times; the word is not.
+        Span::styled(
+            if s.is_live() { "live" } else { "    " }.to_string(),
+            Style::new().fg(color),
         ),
         Span::raw(" "),
         Span::styled(
@@ -444,24 +455,60 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(status.text.clone()).style(style), area);
 }
 
-/// Two rows: what this panel's keys do, and how to reach the other panels.
-/// One row cannot hold both without truncating on a normal popup width.
+/// Two rows, three on the search panel: what this panel's keys do, how to reach
+/// the other panels, and what the row glyphs mean. One row cannot hold them
+/// without truncating on a normal popup width.
+fn hints_height(app: &App) -> u16 {
+    if legend_shown(app) {
+        3
+    } else {
+        2
+    }
+}
+
+fn legend_shown(app: &App) -> bool {
+    app.panel() == Panel::Search && matches!(app.mode(), Mode::Search | Mode::Normal)
+}
+
+/// What the footer can honestly promise about jumping. A bare letter types
+/// while the search box is open, so it is only offered in key mode, and `Enter`
+/// falls back to opening whenever the jump key is something else.
+fn jump_hint(keys: &Keys, mode: Mode) -> String {
+    match keys.jump {
+        KeyBinding::Enter => "enter jump/open".to_string(),
+        KeyBinding::Char(_) if mode == Mode::Search => "enter open".to_string(),
+        _ => format!("enter open · {} jump", keys.jump),
+    }
+}
+
+/// Both keys for the same split, unless the configured one is `v` itself.
+fn split_hint(keys: &Keys) -> String {
+    if keys.open_split == KeyBinding::Char('v') {
+        "v split".to_string()
+    } else {
+        format!("{}/v split", keys.open_split)
+    }
+}
+
 fn render_hints(frame: &mut Frame, area: Rect, app: &App) {
+    let keys = app.keys();
     let actions = match app.mode() {
         Mode::Message => "enter send · esc cancel".to_string(),
         Mode::Compose => "enter ask · esc cancel".to_string(),
         Mode::Waiting => "esc stop waiting".to_string(),
         Mode::Search => {
             let enter = match app.panel() {
-                Panel::Search => "enter open",
-                Panel::Ask => "enter ask",
-                Panel::Replies => "enter read",
+                Panel::Search => jump_hint(keys, app.mode()),
+                Panel::Ask => "enter ask".to_string(),
+                Panel::Replies => "enter read".to_string(),
             };
             format!("type to filter · ↑↓ move · {enter} · tab harness · esc key mode")
         }
         Mode::Normal => match app.panel() {
             Panel::Search => format!(
-                "enter open · v split · d down · t tab · c current · i insert{} · p pin",
+                "{} · {} · d down · t tab · c current · i insert{} · p pin",
+                jump_hint(keys, app.mode()),
+                split_hint(keys),
                 if app.can_message() {
                     " · m message"
                 } else {
@@ -479,6 +526,9 @@ fn render_hints(frame: &mut Frame, area: Rect, app: &App) {
     // While a box is open the letters type, so the panel row would be a lie.
     if matches!(app.mode(), Mode::Search | Mode::Normal) {
         lines.push(Line::from(panels));
+    }
+    if legend_shown(app) {
+        lines.push(Line::from(LEGEND));
     }
     frame.render_widget(
         Paragraph::new(lines).style(Style::new().fg(Color::DarkGray)),
@@ -535,7 +585,7 @@ fn display_width(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{ask_app, fake_app, Fake};
+    use crate::testing::{ask_app, fake_app, keys_app, session, Fake};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -598,15 +648,78 @@ mod tests {
             crossterm::event::KeyCode::Esc,
         ));
         let frame = draw(&mut app, 100, 20).join("\n");
-        assert!(frame.contains("v split"), "{frame}");
+        assert!(
+            frame.contains("enter jump/open · o/v split · d down"),
+            "{frame}"
+        );
         assert!(frame.contains("s search · a ask · r replies"), "{frame}");
         assert!(frame.contains("q quit"));
+        assert!(frame.contains("@ live idle · > live working"), "{frame}");
+        assert!(frame.contains("x gone · * pinned"), "{frame}");
+    }
+
+    #[test]
+    fn the_hints_offer_the_jump_key_only_where_it_works() {
+        let jump_bound_to = |jump| Keys {
+            jump,
+            ..Keys::default()
+        };
+
+        // Alt reaches the action from either mode, and Enter now just opens.
+        let mut app = keys_app(
+            Fake::with_sessions(),
+            jump_bound_to(KeyBinding::AltChar('g')),
+        );
+        let frame = draw(&mut app, 100, 20).join("\n");
+        assert!(frame.contains("enter open · alt-g jump"), "{frame}");
+
+        // A bare letter types into the box, so it is only promised in key mode.
+        let mut app = keys_app(Fake::with_sessions(), jump_bound_to(KeyBinding::Char('g')));
+        let frame = draw(&mut app, 100, 20).join("\n");
+        assert!(frame.contains("enter open · tab harness"), "{frame}");
+        assert!(!frame.contains("g jump"), "{frame}");
+
+        app.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Esc,
+        ));
+        let frame = draw(&mut app, 100, 20).join("\n");
+        assert!(frame.contains("enter open · g jump"), "{frame}");
+    }
+
+    #[test]
+    fn a_running_session_says_live_and_a_quiet_one_leaves_the_column_blank() {
+        let now = Utc::now();
+        let mut s = session(
+            "claude",
+            "8890a685-a0f1-4a9e-949d-f7f386bc4cb6",
+            "trade-help",
+            "API authentication",
+        );
+        let quiet = text_of(&row(&s, 20, now));
+        s.last_pane = Some(hsm_core::PaneRef {
+            pane_id: "w6:p1".into(),
+            live: true,
+            status: Some("idle".into()),
+            ..hsm_core::PaneRef::default()
+        });
+        let live = text_of(&row(&s, 20, now));
+
+        assert!(live.starts_with("@   live "), "{live:?}");
+        assert!(!quiet.contains("live"), "{quiet:?}");
+        // The columns after it still line up.
+        assert_eq!(live.len(), quiet.len());
+    }
+
+    fn text_of(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.to_string()).collect()
     }
 
     #[test]
     fn an_error_is_visible_in_the_status_line() {
         let mut fake = Fake::with_sessions();
         fake.open_fails = true;
+        // The first row is live, so Enter tries the pane before it opens.
+        fake.jump_fails = true;
         let mut app = fake_app(fake);
         app.on_key(crossterm::event::KeyEvent::from(
             crossterm::event::KeyCode::Enter,

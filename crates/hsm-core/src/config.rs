@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{HarnessKind, OpenTarget};
+use crate::domain::{HarnessKind, Keys, OpenTarget};
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +19,7 @@ pub struct Config {
     /// replies panel. Agents answer in their own time; a minute or two is
     /// normal, so this is generous by default.
     pub ask_wait_secs: u64,
+    pub keys: Keys,
 }
 
 impl Default for Config {
@@ -30,6 +31,7 @@ impl Default for Config {
             default_open: OpenTarget::default(),
             agentmail_bin: "agentmail".to_string(),
             ask_wait_secs: 120,
+            keys: Keys::default(),
         }
     }
 }
@@ -57,7 +59,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::SplitDirection;
+    use crate::domain::{KeyBinding, SplitDirection};
 
     #[test]
     fn missing_file_gives_defaults() {
@@ -71,6 +73,8 @@ mod tests {
         );
         assert_eq!(c.agentmail_bin, "agentmail");
         assert_eq!(c.ask_wait_secs, 120);
+        assert_eq!(c.keys.jump, KeyBinding::Enter);
+        assert_eq!(c.keys.open_split, KeyBinding::Char('o'));
     }
 
     #[test]
@@ -89,6 +93,24 @@ mod tests {
         assert!(!c.is_disabled(&HarnessKind::Claude));
         assert_eq!(c.agentmail_bin, "agentmail");
         assert_eq!(c.ask_wait_secs, 30);
+    }
+
+    #[test]
+    fn a_partial_keys_table_keeps_the_other_binding() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "[keys]\njump = \"alt-g\"\n").expect("write");
+        let c = Config::load(&p).expect("load");
+        assert_eq!(c.keys.jump, KeyBinding::AltChar('g'));
+        assert_eq!(c.keys.open_split, KeyBinding::Char('o'));
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_key_is_reported() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "[keys]\njump = \"ctrl-shift-banana\"\n").expect("write");
+        assert!(Config::load(&p).is_err());
     }
 
     #[test]
