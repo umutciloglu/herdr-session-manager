@@ -7,11 +7,13 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::domain::{project_of, HarnessKind, PaneRef, Session};
 use crate::error::Result;
+use crate::harness::claude_registry::{self, RunningRef};
 use crate::harness::herdr_refs::{self, HerdrRef};
 use crate::harness::message::ExtractedMessage;
 use crate::harness::{claude, codex, jsonl, registry};
 use crate::index::{
-    to_millis, upsert_session, Index, LAST_REFRESH_KEY, SOURCE_HERDR, SOURCE_TRANSCRIPT,
+    to_millis, upsert_session, Index, LAST_REFRESH_KEY, SOURCE_HERDR, SOURCE_REGISTRY,
+    SOURCE_TRANSCRIPT,
 };
 use crate::live::LiveSessions;
 use crate::paths;
@@ -29,6 +31,9 @@ pub struct RefreshOptions<'a> {
     /// to point the scan at a fixture tree; Codex then falls back to reading
     /// rollouts rather than its own sqlite index.
     pub store_roots_override: Option<&'a [PathBuf]>,
+    /// Where Claude's running-process registry lives. `None` is
+    /// `claude_registry::registry_dir()`.
+    pub registry_dir_override: Option<&'a Path>,
 }
 
 impl<'a> RefreshOptions<'a> {
@@ -40,6 +45,7 @@ impl<'a> RefreshOptions<'a> {
             live,
             extra_transcript_roots: &[],
             store_roots_override: None,
+            registry_dir_override: None,
         }
     }
 
@@ -55,6 +61,8 @@ pub struct RefreshReport {
     pub sessions_upserted: u64,
     pub messages_indexed: u64,
     pub panes_seen: u64,
+    /// Live harness processes with no pane of their own.
+    pub processes_seen: u64,
     pub marked_gone: u64,
     pub elapsed_ms: u128,
     /// Per-file problems. A refresh never fails because one transcript is bad.
@@ -74,6 +82,12 @@ impl Index {
             tx.execute("DELETE FROM messages", [])?;
         }
         clear_live_flags(&tx)?;
+        // Nothing in a process ref is worth preserving between passes: it is
+        // rebuilt from the registry below, or it is gone.
+        tx.execute(
+            "UPDATE sessions SET process_json = NULL WHERE process_json IS NOT NULL",
+            [],
+        )?;
 
         let hot_cutoff_ms =
             (Utc::now() - chrono::Duration::days(i64::from(opts.hot_days))).timestamp_millis();
@@ -107,6 +121,15 @@ impl Index {
             }
             upsert_pane(&tx, &r)?;
             report.panes_seen += 1;
+        }
+
+        if opts.enabled(&HarnessKind::Claude) {
+            if let Some(dir) = registry_dir(opts) {
+                for r in claude_registry::running(&dir) {
+                    upsert_process(&tx, &r)?;
+                    report.processes_seen += 1;
+                }
+            }
         }
 
         report.marked_gone = mark_gone(&tx)?;
@@ -356,6 +379,48 @@ fn next_seq(conn: &Connection, harness: &HarnessKind, id: &str) -> Result<i64> {
     Ok(n.unwrap_or(-1) + 1)
 }
 
+/// Where to look for Claude's running processes this pass.
+fn registry_dir(opts: &RefreshOptions<'_>) -> Option<PathBuf> {
+    match (opts.registry_dir_override, opts.store_roots_override) {
+        (Some(dir), _) => Some(dir.to_path_buf()),
+        // Same rule as the codex state db: once the scan is pointed at a
+        // fixture tree, this machine's own stores are off limits.
+        (None, Some(_)) => None,
+        (None, None) => claude_registry::registry_dir(),
+    }
+}
+
+/// The process is a snapshot, so this only ever writes `process_json`. The row
+/// itself is created when the registry is the first place we hear of a session
+/// — a job that has not written a transcript yet.
+fn upsert_process(conn: &Connection, r: &RunningRef) -> Result<()> {
+    let process_json = serde_json::to_string(&r.process).unwrap_or_else(|_| "null".to_string());
+    let cwd = r.cwd.to_string_lossy().into_owned();
+    let project = project_of(&r.cwd);
+
+    conn.execute(
+        "INSERT INTO sessions \
+           (harness, id, cwd, project, title, process_json, source, transcript_present) \
+         VALUES ('claude', ?1, ?2, ?3, ?4, ?5, ?6, 0) \
+         ON CONFLICT(id) DO UPDATE SET \
+           process_json = excluded.process_json, \
+           cwd     = CASE WHEN sessions.cwd = '' THEN excluded.cwd ELSE sessions.cwd END, \
+           project = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END, \
+           title   = COALESCE(sessions.title, excluded.title)",
+        // Claude transcripts carry accurate timestamps, so a running process
+        // never bumps last_active_at (same reasoning as `upsert_pane`).
+        rusqlite::params![
+            r.session_id,
+            cwd,
+            project,
+            r.process.name,
+            process_json,
+            SOURCE_REGISTRY,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Tier-1 row: a pane ref is all we know, so it must not overwrite anything a
 /// transcript parse already established.
 fn upsert_pane(conn: &Connection, r: &HerdrRef) -> Result<()> {
@@ -451,7 +516,7 @@ fn mark_gone(conn: &Connection) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RefKind, SessionRef, Tier};
+    use crate::domain::{ProcessKind, RefKind, SessionRef, Tier};
     use crate::live::{LivePane, LiveSessions, NoLive};
 
     struct FakeLive(Vec<LivePane>);
@@ -597,6 +662,21 @@ mod tests {
         store
     }
 
+    /// Claude's process registry, one live entry per `(session id, kind)`. Our
+    /// own pid is the only one guaranteed to be alive while the test runs.
+    fn fixture_registry(entries: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tmp");
+        let pid = std::process::id();
+        for (n, (session_id, kind)) in entries.iter().enumerate() {
+            let body = format!(
+                r#"{{"pid":{pid},"sessionId":"{session_id}","cwd":"/Users/x/Projects/demo",
+                    "kind":"{kind}","status":"busy","name":"a background job"}}"#
+            );
+            std::fs::write(dir.path().join(format!("{pid}-{n}.json")), body).expect("write");
+        }
+        dir
+    }
+
     #[test]
     fn stores_are_scanned_once_and_rescans_are_incremental() {
         let store = fixture_store("11111111-2222-3333-4444-555555555555.jsonl", USER_LINE);
@@ -677,6 +757,72 @@ mod tests {
             idx.get(None, "s1").expect("get").expect("row").tier,
             Tier::Gone
         );
+    }
+
+    /// A Claude background job runs as its own process and never gets a pane,
+    /// so the registry is the only place its liveness shows up.
+    #[test]
+    fn a_running_process_marks_its_session_and_clears_on_the_next_pass() {
+        let store = fixture_store("33333333-2222-3333-4444-555555555555.jsonl", USER_LINE);
+        let registry = fixture_registry(&[("s1", "bg"), ("no-transcript-yet", "interactive")]);
+        let gone = tempfile::tempdir().expect("tmp");
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut idx = Index::open(&dir.path().join("index.sqlite")).expect("open");
+        let none = NoLive;
+        let roots = vec![store.path().to_path_buf()];
+        let opts = RefreshOptions {
+            hot_days: 3650,
+            disabled: &[HarnessKind::Codex],
+            store_roots_override: Some(&roots),
+            registry_dir_override: Some(registry.path()),
+            ..RefreshOptions::new(&none)
+        };
+
+        let report = idx.refresh(&opts).expect("refresh");
+        assert_eq!(report.processes_seen, 2);
+
+        let s = idx.get(None, "s1").expect("get").expect("row");
+        let p = s.process.clone().expect("process");
+        assert_eq!(p.kind, ProcessKind::Job);
+        assert_eq!(p.status.as_deref(), Some("busy"));
+        assert!(s.is_running(), "alive");
+        assert!(!s.is_live(), "but there is no pane to jump to");
+        assert_eq!(
+            s.first_prompt.as_deref(),
+            Some("index me"),
+            "what the transcript pass found is kept"
+        );
+
+        // A job that has not written a transcript yet is known only here.
+        let fresh = idx
+            .get(None, "no-transcript-yet")
+            .expect("get")
+            .expect("row");
+        assert_eq!(fresh.harness, HarnessKind::Claude);
+        assert_eq!(fresh.project, "demo");
+        assert_eq!(fresh.title.as_deref(), Some("a background job"));
+        assert_eq!(
+            fresh.process.map(|p| p.kind),
+            Some(ProcessKind::Interactive)
+        );
+        assert!(
+            fresh.last_active_at.is_none(),
+            "the registry carries no timestamps"
+        );
+
+        // The processes end, and the marks go with them.
+        let opts = RefreshOptions {
+            registry_dir_override: Some(gone.path()),
+            ..opts
+        };
+        assert_eq!(idx.refresh(&opts).expect("refresh").processes_seen, 0);
+        assert!(idx
+            .get(None, "s1")
+            .expect("get")
+            .expect("row")
+            .process
+            .is_none());
     }
 
     /// The provider skips a scan that just happened, so the stamp has to

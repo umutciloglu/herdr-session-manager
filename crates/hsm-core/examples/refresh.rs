@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         live: &live,
         extra_transcript_roots: &config.extra_transcript_roots,
         store_roots_override: None,
+        registry_dir_override: None,
     })?;
 
     println!("{report:#?}");

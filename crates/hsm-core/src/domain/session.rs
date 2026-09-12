@@ -51,6 +51,43 @@ pub struct PaneRef {
     pub status: Option<String>,
 }
 
+/// A harness process that is alive right now but has no herdr pane: a Claude
+/// background job, or an interactive session in some other terminal. Snapshot
+/// only, recomputed on every refresh like `PaneRef::live`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessRef {
+    pub pid: u32,
+    pub kind: ProcessKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessKind {
+    /// Started detached, with no terminal of its own.
+    Job,
+    /// A person is typing at it, just not in a herdr pane.
+    Interactive,
+}
+
+impl ProcessKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProcessKind::Job => "job",
+            ProcessKind::Interactive => "interactive",
+        }
+    }
+}
+
+impl fmt::Display for ProcessKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub harness: HarnessKind,
@@ -66,6 +103,7 @@ pub struct Session {
     pub transcript_present: bool,
     pub tier: Tier,
     pub last_pane: Option<PaneRef>,
+    pub process: Option<ProcessRef>,
     pub pinned: bool,
 }
 
@@ -87,6 +125,7 @@ impl Session {
             transcript_present: false,
             tier: Tier::Warm,
             last_pane: None,
+            process: None,
             pinned: false,
         }
     }
@@ -106,6 +145,12 @@ impl Session {
 
     pub fn is_live(&self) -> bool {
         self.last_pane.as_ref().is_some_and(|p| p.live)
+    }
+
+    /// Alive in any form: a herdr pane, or a process of its own. Jumping still
+    /// needs a pane, so it asks `is_live`.
+    pub fn is_running(&self) -> bool {
+        self.is_live() || self.process.is_some()
     }
 }
 
@@ -194,6 +239,10 @@ pub struct SessionCard {
     /// can focus it instead of starting a second copy of the session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane: Option<PaneCard>,
+    /// A process running this session outside herdr. Alive, but there is no
+    /// pane to focus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessCard>,
 }
 
 /// [`PaneRef`] as it goes over the wire.
@@ -207,6 +256,28 @@ pub struct PaneCard {
     pub live: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+}
+
+/// [`ProcessRef`] as it goes over the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessCard {
+    pub pid: u32,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl From<&ProcessRef> for ProcessCard {
+    fn from(p: &ProcessRef) -> Self {
+        ProcessCard {
+            pid: p.pid,
+            kind: p.kind.as_str().to_string(),
+            status: p.status.clone(),
+            name: p.name.clone(),
+        }
+    }
 }
 
 impl From<&PaneRef> for PaneCard {
@@ -239,6 +310,7 @@ impl From<&Session> for SessionCard {
             // A Gone session cannot be resumed, only restarted in its old cwd.
             resumable: s.tier != Tier::Gone && crate::harness::registry::is_resumable(&s.harness),
             pane: s.last_pane.as_ref().map(PaneCard::from),
+            process: s.process.as_ref().map(ProcessCard::from),
         }
     }
 }
@@ -290,6 +362,34 @@ mod tests {
         assert_eq!(pane.pane_id, "w6:p1");
         assert_eq!(pane.workspace_id.as_deref(), Some("w6"));
         assert!(pane.live);
+    }
+
+    #[test]
+    fn a_card_carries_the_process_only_when_there_is_one() {
+        let mut s = Session::new(HarnessKind::Claude, "abc", "/tmp/proj");
+        assert_eq!(SessionCard::from(&s).process, None);
+        assert!(!s.is_running());
+
+        s.process = Some(ProcessRef {
+            pid: 57845,
+            kind: ProcessKind::Job,
+            status: Some("busy".into()),
+            name: Some("herdr search session linking".into()),
+        });
+        assert!(s.is_running(), "a process with no pane still runs");
+        assert!(!s.is_live(), "but there is nothing to jump to");
+
+        let card = SessionCard::from(&s);
+        let process = card.process.as_ref().expect("process");
+        assert_eq!(process.pid, 57845);
+        assert_eq!(process.kind, "job");
+        assert_eq!(process.status.as_deref(), Some("busy"));
+
+        let json = serde_json::to_string(&card).expect("json");
+        assert!(
+            json.contains(r#""process":{"pid":57845,"kind":"job""#),
+            "{json}"
+        );
     }
 
     #[test]

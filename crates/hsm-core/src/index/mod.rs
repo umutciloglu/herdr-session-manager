@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row};
 
-use crate::domain::{HarnessKind, PaneRef, Session, Tier};
+use crate::domain::{HarnessKind, PaneRef, ProcessRef, Session, Tier};
 use crate::error::{Error, Result};
 
 pub use refresh::{RefreshOptions, RefreshReport};
@@ -17,6 +17,9 @@ pub use search::Query;
 /// apart from a fully parsed transcript.
 pub const SOURCE_TRANSCRIPT: &str = "transcript";
 pub const SOURCE_HERDR: &str = "herdr";
+/// Known only from Claude's registry of running processes: no transcript on
+/// disk yet, and no pane.
+pub const SOURCE_REGISTRY: &str = "registry";
 
 const DEFAULT_HOT_DAYS: u32 = 30;
 
@@ -204,6 +207,10 @@ pub(crate) fn row_to_session(r: &Row<'_>, hot_days: u32) -> Session {
         .get::<_, Option<String>>(12)
         .unwrap_or(None)
         .and_then(|j| serde_json::from_str::<PaneRef>(&j).ok());
+    s.process = r
+        .get::<_, Option<String>>(13)
+        .unwrap_or(None)
+        .and_then(|j| serde_json::from_str::<ProcessRef>(&j).ok());
     s.tier = tier_of(&s, hot_days);
     s
 }
@@ -236,7 +243,7 @@ pub(crate) fn from_millis(ms: i64) -> Option<DateTime<Utc>> {
 
 pub(crate) const SESSION_COLUMNS: &str =
     "harness, id, cwd, project, title, first_prompt, started_at, last_active_at, \
-     size_bytes, transcript_path, transcript_present, pinned, last_pane_json";
+     size_bytes, transcript_path, transcript_present, pinned, last_pane_json, process_json";
 
 pub(crate) fn upsert_session(conn: &Connection, s: &Session, source: &str) -> Result<()> {
     conn.execute(

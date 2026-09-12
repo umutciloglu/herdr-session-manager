@@ -5,7 +5,7 @@ pub mod sessions;
 pub mod setup_chat;
 pub mod startup;
 
-use hsm_core::{HarnessKind, Session, Tier};
+use hsm_core::{HarnessKind, ProcessKind, Session, Tier};
 
 /// `<harness>:<id>` split into what `Index::get` wants. A bare id (no colon)
 /// searches every harness.
@@ -26,10 +26,15 @@ pub fn state_word(s: &Session) -> &'static str {
             Some("blocked") => "blocked",
             _ => "live",
         },
-        _ => match s.tier {
-            Tier::Hot => "hot",
-            Tier::Warm => "warm",
-            Tier::Gone => "gone",
+        // The popup's `job` and `run` tags: running, but with no pane.
+        _ => match s.process.as_ref().map(|p| p.kind) {
+            Some(ProcessKind::Job) => "job",
+            Some(ProcessKind::Interactive) => "run",
+            None => match s.tier {
+                Tier::Hot => "hot",
+                Tier::Warm => "warm",
+                Tier::Gone => "gone",
+            },
         },
     }
 }
@@ -59,6 +64,21 @@ mod tests {
         let mut s = Session::new(HarnessKind::Claude, "x", "/p/demo");
         s.tier = Tier::Gone;
         assert_eq!(state_word(&s), "gone");
+
+        // A background job runs without a pane, so it beats the tier word.
+        s.process = Some(hsm_core::ProcessRef {
+            pid: 57845,
+            kind: ProcessKind::Job,
+            status: Some("busy".into()),
+            name: None,
+        });
+        assert_eq!(state_word(&s), "job");
+        s.process = Some(hsm_core::ProcessRef {
+            kind: ProcessKind::Interactive,
+            ..s.process.clone().expect("process")
+        });
+        assert_eq!(state_word(&s), "run");
+
         s.last_pane = Some(hsm_core::PaneRef {
             pane_id: "w1:p1".into(),
             live: true,

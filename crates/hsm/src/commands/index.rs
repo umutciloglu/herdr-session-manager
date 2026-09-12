@@ -25,6 +25,7 @@ pub fn refresh(
         live,
         extra_transcript_roots: &config.extra_transcript_roots,
         store_roots_override: None,
+        registry_dir_override: None,
     };
     Ok(index.refresh(&opts)?)
 }
@@ -51,13 +52,15 @@ pub fn run(ctx: &Ctx, full: bool) -> Result<()> {
 pub fn summary(r: &RefreshReport, sessions: u64, messages: u64) -> String {
     format!(
         "{sessions} sessions, {messages} messages indexed \
-         ({} files scanned, {} parsed, {} upserted, {} new messages, {} panes, {} gone, {} errors) \
+         ({} files scanned, {} parsed, {} upserted, {} new messages, {} panes, \
+          {} processes, {} gone, {} errors) \
          in {} ms",
         r.files_scanned,
         r.files_parsed,
         r.sessions_upserted,
         r.messages_indexed,
         r.panes_seen,
+        r.processes_seen,
         r.marked_gone,
         r.errors.len(),
         r.elapsed_ms

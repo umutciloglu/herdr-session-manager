@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hsm_core::{
-    HarnessKind, Keys, OpenMethod, OpenReport, OpenTarget, PaneRef, Session, SplitDirection, Tier,
+    HarnessKind, Keys, OpenMethod, OpenReport, OpenTarget, PaneRef, ProcessKind, ProcessRef,
+    Session, SplitDirection, Tier,
 };
 
 use crate::actions::{Actions, BrowseContext, Error, JumpReport, Panel, ReplyRow, Result, Sent};
@@ -76,12 +77,19 @@ impl Fake {
             status: Some("idle".into()),
         });
 
-        let old = session(
+        // A background job: running, but in a process of its own with no pane.
+        let mut old = session(
             "claude",
             "43901a13-7735-465b-9e08-86e55b01c4c5",
             "flip-to-screen",
             "fold animation",
         );
+        old.process = Some(ProcessRef {
+            pid: 57845,
+            kind: ProcessKind::Job,
+            status: Some("busy".into()),
+            name: Some("fold animation".into()),
+        });
 
         let mut gone = session(
             "codex",

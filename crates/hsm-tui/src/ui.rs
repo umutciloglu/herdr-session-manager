@@ -2,7 +2,7 @@
 //! only the renderer knows (it depends on the window height).
 
 use chrono::{DateTime, Local, Utc};
-use hsm_core::{KeyBinding, Keys, Session, Tier};
+use hsm_core::{KeyBinding, Keys, ProcessKind, Session, Tier};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -21,7 +21,7 @@ const LIVE_W: usize = 4;
 const FIXED_W: usize = 2 + 2 + LIVE_W + 1 + HARNESS_W + 1 + PROJECT_W + 1 + AGE_W + 1;
 /// The row glyphs, spelled out under the panel row.
 const LEGEND: &str =
-    "@ live idle · > live working · ! live blocked · + hot · - warm · x gone · * pinned";
+    "@ live idle · > live working · ! live blocked · ~ no pane · + hot · - warm · x gone · * pinned";
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     if app.panel() == Panel::Replies {
@@ -122,10 +122,7 @@ fn row(s: &Session, title_w: usize, now: DateTime<Utc>) -> Line<'static> {
         ),
         Span::raw(" "),
         // The glyph alone is a puzzle the first few times; the word is not.
-        Span::styled(
-            if s.is_live() { "live" } else { "    " }.to_string(),
-            Style::new().fg(color),
-        ),
+        Span::styled(fit(state_tag(s), LIVE_W), Style::new().fg(color)),
         Span::raw(" "),
         Span::styled(
             fit(s.harness.as_str(), HARNESS_W),
@@ -138,9 +135,23 @@ fn row(s: &Session, title_w: usize, now: DateTime<Utc>) -> Line<'static> {
         Span::raw(" "),
         Span::styled(
             pad_left(&age(s.last_active_at, now), AGE_W),
-            Style::new().fg(Color::DarkGray),
+            // Not DarkGray: that is also the highlight background, and the age
+            // of the selected row would disappear into it.
+            Style::new().fg(Color::Gray),
         ),
     ])
+}
+
+/// The word next to the glyph: where the session is running, if it is.
+fn state_tag(s: &Session) -> &'static str {
+    if s.is_live() {
+        return "live";
+    }
+    match s.process.as_ref().map(|p| p.kind) {
+        Some(ProcessKind::Job) => "job",
+        Some(ProcessKind::Interactive) => "run",
+        None => "",
+    }
 }
 
 /// Live state first (that is what the user is looking for), then how reachable
@@ -154,6 +165,13 @@ pub fn state_glyph(s: &Session) -> (&'static str, Color) {
                 _ => ("@", Color::Green),
             };
         }
+    }
+    // Running, but in a process of its own: there is no pane to jump to.
+    if let Some(process) = &s.process {
+        return match process.status.as_deref() {
+            Some("busy") => ("~", Color::Yellow),
+            _ => ("~", Color::Green),
+        };
     }
     match s.tier {
         Tier::Hot => ("+", Color::Cyan),
@@ -218,6 +236,13 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(field(
             "pane",
             format!("{} {live} {status}", pane.pane_id).trim_end(),
+        ));
+    }
+    if let Some(process) = &s.process {
+        let status = process.status.clone().unwrap_or_default();
+        lines.push(field(
+            "process",
+            format!("{} {} {status}", process.pid, process.kind).trim_end(),
         ));
     }
     lines.push(field(
@@ -655,7 +680,19 @@ mod tests {
         assert!(frame.contains("s search · a ask · r replies"), "{frame}");
         assert!(frame.contains("q quit"));
         assert!(frame.contains("@ live idle · > live working"), "{frame}");
+        assert!(frame.contains("~ no pane"), "{frame}");
         assert!(frame.contains("x gone · * pinned"), "{frame}");
+    }
+
+    #[test]
+    fn a_row_running_without_a_pane_names_its_process_in_the_preview() {
+        let mut app = fake_app(Fake::with_sessions());
+        app.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Down,
+        ));
+        let frame = draw(&mut app, 100, 24).join("\n");
+        assert!(frame.contains("~   job "), "{frame}");
+        assert!(frame.contains("57845 job busy"), "{frame}");
     }
 
     #[test]
@@ -708,6 +745,42 @@ mod tests {
         assert!(!quiet.contains("live"), "{quiet:?}");
         // The columns after it still line up.
         assert_eq!(live.len(), quiet.len());
+    }
+
+    /// A process without a pane is running too, and says which kind it is.
+    #[test]
+    fn a_session_running_outside_herdr_gets_the_tilde_and_its_own_tag() {
+        let now = Utc::now();
+        let mut s = session(
+            "claude",
+            "8890a685-a0f1-4a9e-949d-f7f386bc4cb6",
+            "trade-help",
+            "API authentication",
+        );
+        let quiet = text_of(&row(&s, 20, now));
+
+        s.process = Some(hsm_core::ProcessRef {
+            pid: 57845,
+            kind: hsm_core::ProcessKind::Job,
+            status: Some("busy".into()),
+            name: None,
+        });
+        let job = text_of(&row(&s, 20, now));
+        assert!(job.starts_with("~   job  "), "{job:?}");
+        assert_eq!(state_glyph(&s), ("~", Color::Yellow), "busy");
+
+        s.process = Some(hsm_core::ProcessRef {
+            kind: hsm_core::ProcessKind::Interactive,
+            status: Some("idle".into()),
+            ..s.process.clone().expect("process")
+        });
+        let interactive = text_of(&row(&s, 20, now));
+        assert!(interactive.starts_with("~   run  "), "{interactive:?}");
+        assert_eq!(state_glyph(&s), ("~", Color::Green), "idle");
+
+        // The columns after the tag still line up.
+        assert_eq!(job.len(), quiet.len());
+        assert_eq!(interactive.len(), quiet.len());
     }
 
     fn text_of(line: &Line<'_>) -> String {

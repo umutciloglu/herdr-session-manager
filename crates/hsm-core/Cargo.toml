@@ -15,6 +15,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 
+# Only for the kill(pid, 0) liveness probe in harness::claude_registry.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true }

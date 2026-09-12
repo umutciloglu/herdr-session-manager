@@ -33,6 +33,9 @@ const W_TEXT: f64 = 10.0;
 const W_RECENCY: f64 = 3.0;
 const W_PROJECT: f64 = 2.0;
 const W_LIVE: f64 = 5.0;
+/// Running without a pane: still worth surfacing, but less than one the user
+/// can jump straight to.
+const W_RUNNING: f64 = 2.5;
 const W_PINNED: f64 = 1.5;
 /// Days after which the recency bonus has decayed to 1/e.
 const RECENCY_TAU_DAYS: f64 = 30.0;
@@ -91,6 +94,9 @@ impl Index {
                 }
                 if s.is_live() {
                     score += W_LIVE;
+                }
+                if s.process.is_some() && !s.is_live() {
+                    score += W_RUNNING;
                 }
                 if s.pinned {
                     score += W_PINNED;
@@ -177,7 +183,7 @@ fn fts_query(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{PaneRef, Session};
+    use crate::domain::{PaneRef, ProcessKind, ProcessRef, Session};
     use crate::index::SOURCE_TRANSCRIPT;
     use chrono::Duration;
 
@@ -273,6 +279,33 @@ mod tests {
         assert_eq!(
             got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             vec!["live", "cold"]
+        );
+    }
+
+    /// A background job has no pane, so nothing else in the ranking says it is
+    /// the session the user is actually talking to.
+    #[test]
+    fn a_running_process_outranks_an_equally_relevant_session() {
+        let mut running = session("running", "demo", "auth middleware", 200);
+        running.process = Some(ProcessRef {
+            pid: 4242,
+            kind: ProcessKind::Job,
+            status: Some("busy".into()),
+            name: None,
+        });
+        let idx = index_with(&[session("cold", "demo", "auth middleware", 200)]);
+        idx.upsert(&running, SOURCE_TRANSCRIPT).expect("upsert");
+        idx.conn
+            .execute(
+                "UPDATE sessions SET process_json = ?1 WHERE id = 'running'",
+                [serde_json::to_string(&running.process).expect("json")],
+            )
+            .expect("process");
+
+        let got = idx.search(&Query::text("auth")).expect("search");
+        assert_eq!(
+            got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["running", "cold"]
         );
     }
 

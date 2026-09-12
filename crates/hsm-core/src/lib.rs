@@ -16,8 +16,8 @@ pub mod paths;
 
 pub use config::Config;
 pub use domain::{
-    Address, HarnessKind, KeyBinding, Keys, OpenTarget, PaneCard, PaneRef, RefKind, Session,
-    SessionCard, SessionRef, SplitDirection, Tier,
+    Address, HarnessKind, KeyBinding, Keys, OpenTarget, PaneCard, PaneRef, ProcessCard,
+    ProcessKind, ProcessRef, RefKind, Session, SessionCard, SessionRef, SplitDirection, Tier,
 };
 pub use error::{Error, Result};
 pub use index::{Index, Query, RefreshOptions, RefreshReport};

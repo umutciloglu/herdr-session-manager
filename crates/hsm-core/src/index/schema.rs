@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// FTS5 external-content tables are kept in sync by triggers so every write
 /// path (upsert, delete, the refresh batches) stays a plain SQL statement.
@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   transcript_present INTEGER NOT NULL DEFAULT 0,
   pinned             INTEGER NOT NULL DEFAULT 0,
   last_pane_json     TEXT,
+  process_json       TEXT,
   source             TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS sessions_by_activity ON sessions(last_active_at DESC);
@@ -91,10 +92,76 @@ pub fn init(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(DDL)?;
+    migrate(conn)?;
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [SCHEMA_VERSION.to_string()],
     )?;
     Ok(())
+}
+
+/// `CREATE TABLE IF NOT EXISTS` leaves a database from an older version alone,
+/// so columns added since then are filled in here. A user's index must open
+/// without being rebuilt.
+fn migrate(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "sessions", "process_json")? {
+        conn.execute("ALTER TABLE sessions ADD COLUMN process_json TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The version-1 `sessions` table, verbatim, so the migration is exercised
+    /// against the shape that is out there on disk.
+    const V1_SESSIONS: &str = "
+CREATE TABLE sessions (
+  harness            TEXT    NOT NULL,
+  id                 TEXT    NOT NULL PRIMARY KEY,
+  cwd                TEXT    NOT NULL DEFAULT '',
+  project            TEXT    NOT NULL DEFAULT '',
+  title              TEXT,
+  first_prompt       TEXT,
+  started_at         INTEGER,
+  last_active_at     INTEGER,
+  size_bytes         INTEGER NOT NULL DEFAULT 0,
+  transcript_path    TEXT,
+  transcript_present INTEGER NOT NULL DEFAULT 0,
+  pinned             INTEGER NOT NULL DEFAULT 0,
+  last_pane_json     TEXT,
+  source             TEXT    NOT NULL DEFAULT ''
+);";
+
+    #[test]
+    fn an_older_database_gains_the_process_column_and_keeps_its_rows() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(V1_SESSIONS).expect("v1 ddl");
+        conn.execute(
+            "INSERT INTO sessions (harness, id) VALUES ('claude', 'kept')",
+            [],
+        )
+        .expect("row");
+
+        init(&conn).expect("init");
+
+        assert!(has_column(&conn, "sessions", "process_json").expect("pragma"));
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 1, "the old rows survive");
+    }
 }
