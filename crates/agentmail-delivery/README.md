@@ -21,6 +21,9 @@ outside the process.
   recipient reads the store itself and marks the row delivered once its model has seen
   the message. Reporting `Pushed` would mark it delivered while still unread, and the
   recipient's own drain would then skip it.
+- A Stop hook claims and marks its batch in one `BEGIN IMMEDIATE` transaction, so two
+  installed hooks cannot both hand over the same mail, and it skips rows whose id it
+  finds in the transcript after a channel push.
 - A Stop hook only ever blocks on rows that are still `Pending`, which is what makes
   `stop_hook_active` safe: the batch it already handed over is `Delivered`, so the next
   Stop has nothing to say and the loop ends.

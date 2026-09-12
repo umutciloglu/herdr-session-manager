@@ -25,7 +25,7 @@ all of them: `capabilities.experimental = {"claude/channel": {}}` via
 `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`/`CODEX_*`, all inherited by child processes)
 → the SessionStart-hook row for this very pane (`HERDR_PANE_ID`, exact under herdr) →
 the newest unclaimed hook row for this directory started in the last 120 s → a
-provisional `unknown-<pid>` row with a warning.
+provisional `unk<pid>` row with a warning.
 
 A provisional identity is not permanent: the hook row may simply not have been written
 yet. Every poke, every tool call and every 30 s touch asks the session loop to retry,
@@ -35,7 +35,11 @@ logs `adopted the real session id` once.
 ## Channel
 
 Under Claude, pending mail is drained on startup and on every poke, one
-`notifications/claude/channel` per message. A poke also wakes any blocked
+`notifications/claude/channel` per message. A push is an *attempt*: the row keeps its
+`Pending` status and gets a `pushed_at` stamp, because only a session launched with the
+channel flag ever receives the event. At turn end the Stop hook looks each pushed id up
+in the session transcript — Claude records channel events there — and marks it read
+instead of repeating it when it finds one. A later tool call acknowledges the rest. A poke also wakes any blocked
 `agentmail_wait` — the session loop owns the listener and rings a `Notify`, which
 restarts the mailbox wait instead of leaving it to the 250 ms poll. Under Codex there is
 no listener, so `agentmail_wait` polls. Under Codex there is no channel and no poke

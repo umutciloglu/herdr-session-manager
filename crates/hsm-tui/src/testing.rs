@@ -1,6 +1,6 @@
 //! A fake `Actions` so the screen can be driven without herdr, sqlite or a tty.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use chrono::{TimeZone, Utc};
@@ -9,7 +9,7 @@ use hsm_core::{
     HarnessKind, OpenMethod, OpenReport, OpenTarget, PaneRef, Session, SplitDirection, Tier,
 };
 
-use crate::actions::{Actions, BrowseContext, Error, Result};
+use crate::actions::{Actions, BrowseContext, Error, Panel, ReplyRow, Result, Sent};
 use crate::app::App;
 
 thread_local! {
@@ -47,6 +47,13 @@ pub(crate) struct Fake {
     pub sessions: Vec<Session>,
     pub agentmail: bool,
     pub open_fails: bool,
+    /// What `ask` reports about the peer being able to answer right now.
+    pub awaiting: bool,
+    /// Poll number that finally carries the answer, if any.
+    pub reply_on_poll: Option<u32>,
+    /// Mail already waiting for the human when the popup opens.
+    pub waiting_replies: Vec<ReplyRow>,
+    polls: Cell<u32>,
     /// Pins the index would have persisted, so `get` answers like the real one.
     pins: RefCell<HashMap<String, bool>>,
 }
@@ -160,9 +167,61 @@ impl Actions for Fake {
         Ok(format!("queued for {}", session.address().short()))
     }
 
+    fn ask(&self, session: &Session, text: &str) -> Result<Sent> {
+        record(format!("ask({}, {text})", session.address().short()));
+        Ok(Sent {
+            message_id: "01JASKTESTID0000000000000".into(),
+            address: session.address().to_string(),
+            awaiting_reply: self.awaiting,
+        })
+    }
+
+    fn poll_reply(&self, _sent: &Sent) -> Result<Option<ReplyRow>> {
+        let n = self.polls.get() + 1;
+        self.polls.set(n);
+        record(format!("poll({n})"));
+        Ok(match self.reply_on_poll {
+            Some(want) if want == n => Some(ReplyRow {
+                id: "01JREPLY0000000000000000A".into(),
+                from: "claude:8890a685-a0f1-4a9e-949d-f7f386bc4cb6".into(),
+                title: Some("API authentication".into()),
+                when: Utc.with_ymd_and_hms(2026, 9, 12, 8, 0, 0).single(),
+                text: "yes, the token refreshes hourly".into(),
+                reply_to: Some("01JASKTESTID0000000000000".into()),
+                seen: false,
+            }),
+            _ => None,
+        })
+    }
+
+    fn replies(&self) -> Result<Vec<ReplyRow>> {
+        Ok(self.waiting_replies.clone())
+    }
+
+    fn mark_seen(&self, ids: &[String]) -> Result<()> {
+        record(format!("mark_seen({})", ids.join(",")));
+        Ok(())
+    }
+
     fn can_message(&self) -> bool {
         self.agentmail
     }
+}
+
+/// The ask popup: same list, but Enter composes a question.
+pub(crate) fn ask_app(fake: Fake) -> App {
+    LOG.with(|l| l.borrow_mut().clear());
+    App::new(
+        Box::new(fake),
+        BrowseContext {
+            invoking_pane: Some("w1:p1".into()),
+            invoking_pane_has_agent: true,
+            default_open: OpenTarget::Split(SplitDirection::Horizontal),
+            start_panel: Panel::Ask,
+            sender_note: Some("asking as human:tester from pane w9:p7".into()),
+            ..BrowseContext::default()
+        },
+    )
 }
 
 /// A popup opened from a plain shell pane: `c` is allowed, nothing is running.
@@ -174,6 +233,8 @@ pub(crate) fn fake_app(fake: Fake) -> App {
             invoking_pane: None,
             invoking_pane_has_agent: false,
             default_open: OpenTarget::Split(SplitDirection::Horizontal),
+            start_panel: Panel::Search,
+            ..BrowseContext::default()
         },
     )
 }

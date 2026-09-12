@@ -7,7 +7,10 @@ use agentmail_core::{
     Address, AgentState, Deliverer, DeliveryOutcome, DeliveryRequest, DirectoryEntry, Harness,
     Message, Registration, Resolved, SendMode,
 };
-use agentmail_delivery::{HerdrDirectory, HerdrPromptDeliverer};
+use agentmail_core::{Message as CoreMessage, Store};
+use agentmail_delivery::{
+    pane_address, HerdrDirectory, HerdrPaneSpawner, HerdrPromptDeliverer, PaneRequest, PaneSpawner,
+};
 use herdr_client::HerdrClient;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -105,6 +108,7 @@ fn live(state: AgentState) -> Resolved {
             state,
             cwd: None,
             title: None,
+            pane: Some("w1:p3".into()),
         }),
     )
 }
@@ -218,6 +222,58 @@ async fn claude_peers_are_left_to_their_channel() {
         })
         .await;
     assert!(matches!(outcome, DeliveryOutcome::Failed(e) if e.contains("channel")));
+}
+
+/// A brand new agent may sit in a trust or channel dialog for a while, and `agent.start`
+/// says so. The pane exists, so the mail waits on the pane rather than on an address
+/// nothing can ever drain.
+#[tokio::test]
+async fn a_pane_that_will_not_start_yet_keeps_the_mail_on_the_pane() {
+    let fake = Fake::spawn(|req| {
+        let id = req.get("id").cloned();
+        match req.get("method").and_then(Value::as_str) {
+            Some("pane.split") => json!({"id": id, "result": {"pane": {"pane_id": "w1:p9"}}}),
+            _ => {
+                json!({"id": id, "error": {"code": "agent_not_ready", "message": "still booting"}})
+            }
+        }
+    });
+
+    let store = Store::open_in_memory().expect("store");
+    let msg = CoreMessage::new(
+        Address::new(Harness::Claude, "8890a685-1111-2222-3333-444444444444"),
+        Address::new(Harness::Codex, "new"),
+        "look at the parser",
+    );
+    store.enqueue(&msg).expect("enqueue");
+
+    let spawner = HerdrPaneSpawner::new(fake.client().await);
+    let outcome = spawner
+        .spawn_pane(PaneRequest {
+            harness: &Harness::Codex,
+            message: &msg,
+            envelope: "[agentmail] from claude:8890a685 · id x\nlook at the parser",
+            resume: None,
+            extra_args: &[],
+            store: &store,
+        })
+        .await;
+
+    assert_eq!(
+        outcome,
+        DeliveryOutcome::Queued,
+        "a dialog is a wait, not a failure"
+    );
+    let parked = pane_address(&Harness::Codex, "w1:p9");
+    assert_eq!(
+        store.pending_for(&parked).expect("pending").len(),
+        1,
+        "the row waits on the pane"
+    );
+    assert!(store
+        .pending_for(&Address::new(Harness::Codex, "new"))
+        .expect("pending")
+        .is_empty());
 }
 
 #[tokio::test]

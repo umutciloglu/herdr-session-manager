@@ -39,9 +39,9 @@ async fn main() -> anyhow::Result<()> {
             mail::send(&ctx, &to, &text, expects_reply, mode, wait).await
         }
 
-        Command::Inbox { addr } => {
+        Command::Inbox { addr, json } => {
             let ctx = Ctx::open(None).await?;
-            mail::inbox(&ctx, addr.as_deref())
+            mail::inbox(&ctx, addr.as_deref(), json)
         }
 
         Command::Wait { timeout } => {

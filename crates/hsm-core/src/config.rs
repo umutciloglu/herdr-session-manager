@@ -15,6 +15,10 @@ pub struct Config {
     pub extra_transcript_roots: Vec<PathBuf>,
     pub default_open: OpenTarget,
     pub agentmail_bin: String,
+    /// How long the ask popup watches for an answer before leaving it to the
+    /// replies panel. Agents answer in their own time; a minute or two is
+    /// normal, so this is generous by default.
+    pub ask_wait_secs: u64,
 }
 
 impl Default for Config {
@@ -25,6 +29,7 @@ impl Default for Config {
             extra_transcript_roots: Vec::new(),
             default_open: OpenTarget::default(),
             agentmail_bin: "agentmail".to_string(),
+            ask_wait_secs: 120,
         }
     }
 }
@@ -65,6 +70,7 @@ mod tests {
             OpenTarget::Split(SplitDirection::Horizontal)
         );
         assert_eq!(c.agentmail_bin, "agentmail");
+        assert_eq!(c.ask_wait_secs, 120);
     }
 
     #[test]
@@ -73,7 +79,7 @@ mod tests {
         let p = dir.path().join("config.toml");
         std::fs::write(
             &p,
-            "hot_days = 7\ndisabled_harnesses = [\"codex\", \"gemini\"]\ndefault_open = \"tab\"\n",
+            "hot_days = 7\ndisabled_harnesses = [\"codex\", \"gemini\"]\ndefault_open = \"tab\"\nask_wait_secs = 30\n",
         )
         .expect("write");
         let c = Config::load(&p).expect("load");
@@ -82,6 +88,7 @@ mod tests {
         assert!(c.is_disabled(&HarnessKind::Codex));
         assert!(!c.is_disabled(&HarnessKind::Claude));
         assert_eq!(c.agentmail_bin, "agentmail");
+        assert_eq!(c.ask_wait_secs, 30);
     }
 
     #[test]

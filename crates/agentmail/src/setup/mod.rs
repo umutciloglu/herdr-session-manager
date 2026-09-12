@@ -98,28 +98,42 @@ impl Setup {
         format!("{exe} hook {event}")
     }
 
+    /// What this binary is called, whatever directory it was run from. Entries are
+    /// recognised by this plus their arguments, so a second `setup` from another path
+    /// updates the entry instead of installing a rival one that fires as well.
+    fn basename(&self) -> String {
+        Path::new(&self.exe)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "agentmail".to_string())
+    }
+
+    /// Event, arguments and matcher for the hook rows; `None` for everything else.
+    fn hook_spec(kind: Kind) -> Option<(&'static str, [&'static str; 2], Option<&'static str>)> {
+        match kind {
+            Kind::ClaudeStop => Some(("Stop", ["hook", "claude-stop"], None)),
+            // Claude's own SessionStart groups carry a matcher; herdr's installed group
+            // is the proof that this shape is accepted.
+            Kind::ClaudeSessionStart => {
+                Some(("SessionStart", ["hook", "claude-session-start"], Some("*")))
+            }
+            Kind::CodexStop => Some(("Stop", ["hook", "codex-stop"], None)),
+            Kind::CodexSessionStart => {
+                Some(("SessionStart", ["hook", "codex-session-start"], None))
+            }
+            _ => None,
+        }
+    }
+
     fn installed(&self, kind: Kind) -> bool {
         let content = read(&self.file(kind));
+        if let Some((event, args, _)) = Self::hook_spec(kind) {
+            return edits::hook_installed(&content, event, &self.basename(), &args);
+        }
         match kind {
-            Kind::ClaudeMcp => edits::mcp_json_installed(&content, MCP_NAME),
-            Kind::ClaudeStop => {
-                edits::hook_installed(&content, "Stop", &self.hook_command("claude-stop"))
-            }
-            Kind::ClaudeSessionStart => edits::hook_installed(
-                &content,
-                "SessionStart",
-                &self.hook_command("claude-session-start"),
-            ),
-            Kind::ChannelHint => false,
-            Kind::CodexMcp => edits::mcp_toml_installed(&content, MCP_NAME),
-            Kind::CodexStop => {
-                edits::hook_installed(&content, "Stop", &self.hook_command("codex-stop"))
-            }
-            Kind::CodexSessionStart => edits::hook_installed(
-                &content,
-                "SessionStart",
-                &self.hook_command("codex-session-start"),
-            ),
+            Kind::ClaudeMcp => edits::mcp_json_installed(&content, MCP_NAME, &self.basename()),
+            Kind::CodexMcp => edits::mcp_toml_installed(&content, MCP_NAME, &self.basename()),
+            _ => false,
         }
     }
 
@@ -144,67 +158,73 @@ impl Setup {
     }
 
     fn install(&self, kind: Kind) -> anyhow::Result<()> {
+        if Self::hook_spec(kind).is_some() {
+            self.write_hook(kind, true)?;
+            return Ok(());
+        }
         match kind {
             Kind::ClaudeMcp => self.install_claude_mcp(),
-            Kind::ClaudeStop => self.install_hook("Stop", "claude-stop", None),
-            // Claude's own SessionStart groups carry a matcher; herdr's installed group
-            // is the proof that this shape is accepted.
-            Kind::ClaudeSessionStart => {
-                self.install_hook("SessionStart", "claude-session-start", Some("*"))
-            }
+            Kind::CodexMcp => self.install_codex_mcp(),
             Kind::ChannelHint => {
                 print_channel_hint();
                 Ok(())
             }
-            Kind::CodexMcp => self.install_codex_mcp(),
-            Kind::CodexStop => self.install_hook("Stop", "codex-stop", None),
-            Kind::CodexSessionStart => {
-                self.install_hook("SessionStart", "codex-session-start", None)
-            }
+            _ => Ok(()),
         }
     }
 
     fn uninstall(&self, kind: Kind) -> anyhow::Result<()> {
         let path = self.file(kind);
         let content = read(&path);
+        if let Some((event, args, _)) = Self::hook_spec(kind) {
+            let next = edits::remove_hook(&content, event, &self.basename(), &args, "hooks")?;
+            return write(&path, &next);
+        }
         let next = match kind {
             Kind::ClaudeMcp => edits::remove_mcp_json(&content, MCP_NAME, "~/.claude.json")?,
-            Kind::ClaudeStop => edits::remove_hook(
-                &content,
-                "Stop",
-                &self.hook_command("claude-stop"),
-                "settings",
-            )?,
-            Kind::ClaudeSessionStart => edits::remove_hook(
-                &content,
-                "SessionStart",
-                &self.hook_command("claude-session-start"),
-                "settings",
-            )?,
-            Kind::ChannelHint => return Ok(()),
             Kind::CodexMcp => edits::remove_mcp_toml(&content, MCP_NAME)?,
-            Kind::CodexStop => {
-                edits::remove_hook(&content, "Stop", &self.hook_command("codex-stop"), "hooks")?
-            }
-            Kind::CodexSessionStart => edits::remove_hook(
-                &content,
-                "SessionStart",
-                &self.hook_command("codex-session-start"),
-                "hooks",
-            )?,
+            _ => return Ok(()),
         };
         write(&path, &next)
     }
 
-    fn install_hook(&self, event: &str, arg: &str, matcher: Option<&str>) -> anyhow::Result<()> {
-        let path = if arg.starts_with("claude") {
-            self.claude_settings()
-        } else {
-            self.codex_hooks()
+    /// Writes our hook entry and reports how many duplicates of it were folded away.
+    fn write_hook(&self, kind: Kind, add_if_missing: bool) -> anyhow::Result<usize> {
+        let Some((event, args, matcher)) = Self::hook_spec(kind) else {
+            return Ok(0);
         };
+        let path = self.file(kind);
         let content = read(&path);
-        let next = edits::add_hook(&content, event, &self.hook_command(arg), matcher, "hooks")?;
-        write(&path, &next)
+        let command = self.hook_command(args[1]);
+        let edit = edits::set_hook(
+            &content,
+            &edits::HookSpec {
+                event,
+                command: &command,
+                basename: &self.basename(),
+                args: &args,
+                matcher,
+                add_if_missing,
+                path: "hooks",
+            },
+        )?;
+        if edit.content != content {
+            write(&path, &edit.content)?;
+        }
+        Ok(edit.collapsed)
+    }
+
+    /// Folds away entries an earlier `setup` left behind when it was run from another
+    /// directory: same binary, same arguments, different path — and every one of them
+    /// fires, so the model reads every message twice.
+    pub fn migrate(&self) -> anyhow::Result<usize> {
+        let mut collapsed = 0;
+        for (kind, _) in ITEMS {
+            if Self::hook_spec(kind).is_some() && self.installed(kind) {
+                collapsed += self.write_hook(kind, false)?;
+            }
+        }
+        Ok(collapsed)
     }
 
     /// The harness CLI knows its own file format best, so try it first and only edit
@@ -291,6 +311,17 @@ pub fn run(check: bool, yes: bool, home: Option<PathBuf>) -> anyhow::Result<i32>
     let home_arg = home.clone();
     let setup = Setup::new(home)?;
 
+    // An older setup, run from a different directory, may have left a second copy of
+    // every hook behind. Fold them together before showing anyone the state.
+    match setup.migrate() {
+        Ok(0) => {}
+        Ok(n) => println!(
+            "collapsed {n} duplicate hook entr{}\n",
+            if n == 1 { "y" } else { "ies" }
+        ),
+        Err(e) => eprintln!("could not collapse duplicate hooks: {e}"),
+    }
+
     if check {
         setup.print();
         let missing = setup.missing();
@@ -307,6 +338,7 @@ pub fn run(check: bool, yes: bool, home: Option<PathBuf>) -> anyhow::Result<i32>
             setup.install(kind)?;
         }
         setup.print();
+        print_codex_trust_note();
         print_channel_hint();
         return Ok(0);
     }
@@ -362,6 +394,10 @@ fn plain_loop(setup: Setup) -> anyhow::Result<i32> {
 
 /// Channels are a launch-time flag, so there is nothing to install — only something to
 /// tell the user. We never edit shell rc files.
+fn print_codex_trust_note() {
+    println!("\nCodex asks you to trust its hooks once after each change to hooks.json.");
+}
+
 fn print_channel_hint() {
     println!("\nClaude only opens a channel when it is launched with:\n");
     println!("  claude {CHANNEL_FLAG}\n");

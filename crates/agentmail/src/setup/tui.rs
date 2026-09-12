@@ -16,6 +16,9 @@ use ratatui::{DefaultTerminal, Frame};
 const NAME_W: usize = 34;
 const FILE_W: usize = 26;
 const HELP: &str = "↑↓ move · space toggle · a all · n none · enter apply · ? hint · q quit";
+/// Codex verifies a hash of every hook handler and asks the user to trust it again
+/// whenever hooks.json changes. We cannot pre-approve that for them.
+const CODEX_TRUST: &str = "Codex asks you to trust its hooks once after each change to hooks.json.";
 
 /// One checklist row as the installer sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,10 +172,11 @@ fn rows_of(items: Vec<ItemState>) -> Vec<Row> {
 
 pub fn render(frame: &mut Frame, app: &App) {
     let footer = (app.results.len() + app.hint.len()).min(6) as u16;
-    let [head, body, notes, help] = Layout::vertical([
+    let [head, body, notes, trust, help] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
         Constraint::Length(footer),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -180,6 +184,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_head(frame, head, app);
     render_rows(frame, body, app);
     render_notes(frame, notes, app);
+    frame.render_widget(
+        Paragraph::new(Line::from(CODEX_TRUST).style(Style::new().fg(Color::DarkGray))),
+        trust,
+    );
     frame.render_widget(
         Paragraph::new(Line::from(HELP).style(Style::new().fg(Color::DarkGray))),
         help,
@@ -438,6 +446,10 @@ mod tests {
         assert_eq!(
             lines[5],
             "  [-] Claude channel flag (launch hint) ~/.claude/settings.json   n/a"
+        );
+        assert_eq!(
+            lines[10],
+            "Codex asks you to trust its hooks once after each change to hooks.json."
         );
         assert_eq!(
             lines[11],

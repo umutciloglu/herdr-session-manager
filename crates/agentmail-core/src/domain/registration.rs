@@ -48,6 +48,10 @@ impl Registration {
         Address::new(self.harness.clone(), self.session_id.clone())
     }
 
+    pub fn is_human(&self) -> bool {
+        self.harness.is_human()
+    }
+
     /// A registration standing in for an agent herdr can see but that never registered
     /// with agentmail. It has no pid and no poke socket, so delivery falls through to
     /// whatever transport the directory adapter provides.
@@ -61,7 +65,7 @@ impl Registration {
             pid: None,
             cwd: entry.cwd.clone().unwrap_or_default(),
             poke_path: None,
-            herdr_pane: None,
+            herdr_pane: entry.pane.clone(),
             started_at: now,
             last_seen: now,
         })

@@ -31,6 +31,9 @@ pub struct DirectoryEntry {
     pub state: AgentState,
     pub cwd: Option<PathBuf>,
     pub title: Option<String>,
+    /// Multiplexer pane id. Confirms a hook-created registration whose session id the
+    /// multiplexer does not report.
+    pub pane: Option<String>,
 }
 
 impl DirectoryEntry {
@@ -41,6 +44,7 @@ impl DirectoryEntry {
             state,
             cwd: None,
             title: None,
+            pane: None,
         }
     }
 }

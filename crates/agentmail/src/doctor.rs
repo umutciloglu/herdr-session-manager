@@ -32,6 +32,11 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
     println!("  spawn.claude     {:?}", ctx.cfg.spawn.claude_extra_args);
     println!("  spawn.codex      {:?}", ctx.cfg.spawn.codex_extra_args);
 
+    match ctx.store.prune(chrono::Utc::now()) {
+        Ok(n) => println!("\npruned      {n} stale registry row(s)"),
+        Err(e) => println!("\npruned      failed: {e}"),
+    }
+
     println!("\nlive registrations");
     let live = ctx.store.live()?;
     if live.is_empty() {

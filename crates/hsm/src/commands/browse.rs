@@ -1,11 +1,12 @@
 //! `hsm browse` — the popup entrypoint.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use herdr_client::{HerdrClient, PluginEnv};
 use hsm_core::domain::project_of;
-use hsm_tui::BrowseContext;
+use hsm_tui::{BrowseContext, Panel};
 
 use crate::actions::TuiActions;
 use crate::agentmail;
@@ -13,7 +14,17 @@ use crate::commands::index::refresh;
 use crate::herdr_adapter;
 use crate::runtime::Ctx;
 
+/// The popup, opened on the search panel.
 pub fn run(ctx: &Ctx, pane_mode: bool) -> Result<()> {
+    screen(ctx, pane_mode, Panel::Search)
+}
+
+/// The same popup, opened on the ask panel. One app, one process, two ways in.
+pub fn ask(ctx: &Ctx, pane_mode: bool) -> Result<()> {
+    screen(ctx, pane_mode, Panel::Ask)
+}
+
+fn screen(ctx: &Ctx, pane_mode: bool, start_panel: Panel) -> Result<()> {
     let client = ctx.herdr();
     let mut index = ctx.index()?;
 
@@ -28,19 +39,28 @@ pub fn run(ctx: &Ctx, pane_mode: bool) -> Result<()> {
     }
 
     let invoking_pane = invoking_pane(&ctx.plugin, pane_mode);
+    // Everything this popup sends is from the human. The agent in the invoking
+    // pane is named only so the screen can say where the question came from:
+    // sending as that agent would deliver the reply *into* it.
+    let human = agentmail::human_address();
     let browse = BrowseContext {
         invoking_pane: invoking_pane.clone(),
         // Typing a resume command into a running agent would feed it a prompt.
         invoking_pane_has_agent: ctx.plugin.agent().is_some(),
         default_open: ctx.config.default_open,
+        start_panel,
+        ask_wait: Duration::from_secs(ctx.config.ask_wait_secs),
+        sender_note: Some(sender_note(
+            ctx,
+            client.as_ref(),
+            invoking_pane.as_deref(),
+            &human,
+        )),
     };
     let actions = TuiActions::new(index, client.clone(), ctx.handle())
         .invoking_pane(invoking_pane.clone())
         .project(ctx.plugin.cwd().map(|c| project_of(Path::new(c))))
-        .agentmail(
-            agentmail::find(&ctx.config.agentmail_bin),
-            sender(ctx, client.as_ref(), invoking_pane.as_deref()),
-        );
+        .agentmail(agentmail::find(&ctx.config.agentmail_bin), Some(human));
 
     let status = hsm_tui::run(Box::new(actions), browse)?;
     // A popup vanishes with its process; a `--pane-mode` split does not, so the
@@ -51,10 +71,26 @@ pub fn run(ctx: &Ctx, pane_mode: bool) -> Result<()> {
     Ok(())
 }
 
-/// Who a message from here is from: the session herdr runs in the invoking
-/// pane. The context says whether that pane holds an agent at all, and the
-/// snapshot carries its session ref. `None` leaves the sender to agentmail.
-fn sender(ctx: &Ctx, client: Option<&HerdrClient>, invoking_pane: Option<&str>) -> Option<String> {
+/// What the compose box says about the sender. The agent in the invoking pane
+/// is provenance, not identity: `asking as human:me from claude:8890a685`.
+fn sender_note(
+    ctx: &Ctx,
+    client: Option<&HerdrClient>,
+    invoking_pane: Option<&str>,
+    human: &str,
+) -> String {
+    match pane_agent(ctx, client, invoking_pane) {
+        Some(agent) => format!("asking as {human} from {agent}"),
+        None => format!("asking as {human}"),
+    }
+}
+
+/// The session herdr runs in the invoking pane, when it runs one.
+fn pane_agent(
+    ctx: &Ctx,
+    client: Option<&HerdrClient>,
+    invoking_pane: Option<&str>,
+) -> Option<String> {
     ctx.plugin.agent()?;
     let client = client?;
     let pane = invoking_pane?;

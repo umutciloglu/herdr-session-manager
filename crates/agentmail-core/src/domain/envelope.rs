@@ -57,6 +57,7 @@ mod tests {
             status: MessageStatus::Pending,
             created_at: ids::now(),
             delivered_at: None,
+            pushed_at: None,
             error: None,
         }
     }

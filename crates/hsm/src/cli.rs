@@ -31,6 +31,13 @@ enum Command {
         pane_mode: bool,
     },
 
+    /// Ask an agent session a question (the same screen, opening disabled).
+    Ask {
+        /// Running in a normal split pane instead of a popup.
+        #[arg(long)]
+        pane_mode: bool,
+    },
+
     /// Restore a session into a pane and print what happened as JSON.
     Open {
         /// `<harness>:<id>`, or an id prefix of at least 8 characters.
@@ -80,7 +87,7 @@ pub fn main() -> ExitCode {
     let cli = Cli::parse();
     // A popup's stderr is the popup itself, so log lines would smear the TUI;
     // only opt in when the user asked for logs.
-    let quiet = matches!(cli.command, Command::Browse { .. });
+    let quiet = matches!(cli.command, Command::Browse { .. } | Command::Ask { .. });
     init_logging(quiet);
 
     match run(cli) {
@@ -96,6 +103,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let ctx = Ctx::load()?;
     match cli.command {
         Command::Browse { pane_mode } => commands::browse::run(&ctx, pane_mode)?,
+        Command::Ask { pane_mode } => commands::browse::ask(&ctx, pane_mode)?,
         Command::Open {
             address,
             target,

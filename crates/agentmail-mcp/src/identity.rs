@@ -20,7 +20,7 @@
 //!    above. A `CLAUDE_CODE_SESSION_ID` inside a Codex process is somebody else's id.
 //! 5. The registry row a SessionStart hook wrote for this very pane (`HERDR_PANE_ID`),
 //!    then the newest unclaimed hook row for this directory from the last two minutes.
-//! 6. A provisional `unknown-<pid>` row, so the process still works and still shows up
+//! 6. A provisional `unk<pid>` row, so the process still works and still shows up
 //!    in `doctor`, just not addressably. It is retried later: see [`Identity::reresolve`].
 
 use std::collections::HashMap;
@@ -164,7 +164,9 @@ impl Identity {
 
         Identity {
             harness,
-            session_id: format!("unknown-{}", ev.pid),
+            // Short enough that `Address::short()` still shows the pid: `unknown-<pid>`
+            // truncated to eight characters read as plain "unknown-" in every envelope.
+            session_id: format!("unk{}", ev.pid),
             cwd: ev.cwd.clone(),
             pid: ev.pid,
             herdr_pane,
@@ -192,6 +194,19 @@ impl Identity {
 
     pub fn address(&self) -> Address {
         Address::new(self.harness.clone(), self.session_id.clone())
+    }
+
+    /// This process, now that something has named the session it belongs to. The pid,
+    /// cwd and pane are ours; only the name changes.
+    pub fn adopted(&self, address: Address) -> Identity {
+        Identity {
+            harness: address.harness,
+            session_id: address.id,
+            cwd: self.cwd.clone(),
+            pid: self.pid,
+            herdr_pane: self.herdr_pane.clone(),
+            provisional: false,
+        }
     }
 
     pub fn registration(&self, poke_path: Option<String>) -> Registration {
@@ -548,7 +563,7 @@ mod tests {
     fn an_unidentifiable_process_still_gets_an_address() {
         let store = Store::open_in_memory().expect("store");
         let id = Identity::from_env(&env(&[]), Path::new("/repo"), 1234, &store);
-        assert_eq!(id.session_id, "unknown-1234");
+        assert_eq!(id.session_id, "unk1234");
         assert!(id.provisional);
         // Nothing said otherwise, so assume the harness most likely to run us.
         assert_eq!(id.harness, Harness::Claude);

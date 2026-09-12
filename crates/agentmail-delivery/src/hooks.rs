@@ -1,9 +1,11 @@
 //! Harness hook handlers. Pure functions over a `&Store` so they can be unit-tested
 //! with sample JSON — the binary only supplies stdin and prints what comes back.
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-use agentmail_core::{Address, Envelope, Harness, Registration, Store};
+use agentmail_core::{Address, Envelope, Harness, Message, Registration, Store};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -61,18 +63,60 @@ pub fn drain_stop(store: &Store, harness: &Harness, input: &str) -> Result<Optio
     let hook = HookInput::parse(input)?;
     let addr = hook.address(harness);
 
-    let pending = store.pending_for(&addr)?;
-    if pending.is_empty() {
+    // Claim and mark in one transaction: a session can have two Stop hooks installed
+    // (an old path and a new one), and both firing must not hand the model the same
+    // mail twice.
+    let claimed = store.claim_pending(&addr)?;
+    if claimed.is_empty() {
         return Ok(None);
     }
 
-    let reason = Envelope::render_batch(&pending);
-    let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
-    store.mark_delivered(&ids)?;
+    // A row that went out over a channel may already be in the model's context. Claude
+    // records channel events in the transcript, so the transcript is the only honest
+    // answer to "did it arrive?" — a hit means read, a miss means push again here.
+    let (seen, fresh): (Vec<Message>, Vec<Message>) = claimed
+        .into_iter()
+        .partition(|msg| already_seen(msg, hook.transcript_path.as_deref()));
+    if !seen.is_empty() {
+        let ids: Vec<String> = seen.iter().map(|m| m.id.clone()).collect();
+        store.mark_read(&ids)?;
+    }
+    if fresh.is_empty() {
+        return Ok(None);
+    }
+
+    let reason = Envelope::render_batch(&fresh);
 
     Ok(Some(
         json!({ "decision": "block", "reason": reason }).to_string(),
     ))
+}
+
+/// Only the tail is read: a long session's transcript is large, and a channel event
+/// this turn is always near the end.
+const TRANSCRIPT_TAIL: u64 = 2 * 1024 * 1024;
+
+/// Was this message already put in front of the model by a channel push?
+fn already_seen(msg: &Message, transcript: Option<&str>) -> bool {
+    if msg.pushed_at.is_none() {
+        return false;
+    }
+    transcript.is_some_and(|path| transcript_mentions(Path::new(path), &msg.id))
+}
+
+fn transcript_mentions(path: &Path, needle: &str) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > TRANSCRIPT_TAIL && file.seek(SeekFrom::End(-(TRANSCRIPT_TAIL as i64))).is_err() {
+        return false;
+    }
+    let mut buf = Vec::with_capacity(TRANSCRIPT_TAIL.min(len) as usize + 1);
+    if file.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&buf).contains(needle)
 }
 
 /// SessionStart hook: make the session addressable before its MCP process is up.
@@ -94,8 +138,18 @@ pub fn session_start_in(
 ) -> Result<Address> {
     let hook = HookInput::parse(input)?;
     let mut reg = Registration::new(harness.clone(), hook.session_id.clone(), hook.working_dir());
-    reg.herdr_pane = herdr_pane;
+    reg.herdr_pane = herdr_pane.clone();
     store.register(&reg)?;
+
+    // Mail that was parked on this pane while the agent was still starting up (trust
+    // prompts, channel confirmation) now has a real address to go to. This is the first
+    // moment anything knows both halves.
+    if let Some(pane) = herdr_pane {
+        let placeholder = crate::pane::pane_address(harness, &pane);
+        for msg in store.pending_for(&placeholder)? {
+            store.retarget(&msg.id, &reg.address())?;
+        }
+    }
     Ok(reg.address())
 }
 

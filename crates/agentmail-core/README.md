@@ -45,6 +45,13 @@ On Windows the poke socket is a named pipe, `\\.\pipe\agentmail-<harness>-<id>`.
 - **A broken `SessionProvider` is a missing one.** Non-zero exit or malformed JSON
   degrades to registry + directory; it never fails a send.
 - **Ambiguity is never guessed.** Two matches stop as `Ambiguous` with candidate cards.
+- **A hook row is a claim, not a process.** A SessionStart hook records that a session
+  existed; nothing tells us when its pane closed. So a registration with no pid counts as
+  live only inside `HOOK_ROW_TTL` (10 min), and only if a `Directory` confirms it —
+  the multiplexer is authoritative whenever one is wired up. A proven pid is live
+  regardless. Not live is not gone: an unconfirmed session still resolves `Offline`, which
+  is what lets ask mode resume it. `Store::prune` clears dead pids and pid-less rows older
+  than 24 h; `human:<name>` rows survive forever.
 - **Ask mode has two shapes.** A spawner either returns `DeliveryOutcome::Replied` with
   the one-shot answer, or enqueues a reply and returns `Spawned`; `send` picks up either
   without blocking. A headless run that leaves no resumable session reports
@@ -53,9 +60,11 @@ On Windows the poke socket is a named pipe, `\\.\pipe\agentmail-<harness>-<id>`.
 ## Resolution order
 
 `exact address in registry → alias in registry → alias in directory → prefix (≥ 8 chars)
-in registry → prefix in directory → provider search`. A full-looking address that nothing
-recognises resolves to `Offline` rather than `NotFound`: the message queues, and a
-SessionStart hook drains it once that session appears.
+in registry → prefix in directory → provider search`. Registry lookups run over every row,
+not just the live ones, and each match is then judged `Live` or `Offline` by the rule
+above. A full-looking address that nothing recognises resolves to `Offline` rather than
+`NotFound`: the message queues, and a SessionStart hook drains it once that session
+appears.
 
 ## Tests
 

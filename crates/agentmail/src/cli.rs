@@ -54,6 +54,9 @@ pub enum Command {
         /// Whose inbox. Defaults to this session.
         #[arg(long)]
         addr: Option<String>,
+        /// Machine-readable: {"address", "messages": [...]}, oldest first.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Block until the next message for this session arrives.

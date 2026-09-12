@@ -46,6 +46,7 @@ disabled_harnesses = []
 extra_transcript_roots = []
 default_open = "split"        # current | split | split-vertical | tab
 agentmail_bin = "agentmail"
+ask_wait_secs = 120           # how long the ask popup watches for an answer
 ```
 
 State dir: `HSM_STATE_DIR`, else `~/.local/state/hsm` (the herdr plugin state

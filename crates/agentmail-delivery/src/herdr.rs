@@ -87,6 +87,9 @@ pub fn entry_of(agent: &AgentInfo) -> DirectoryEntry {
             .terminal_title_stripped
             .clone()
             .or_else(|| agent.title.clone()),
+        // The resolver confirms hook-registered rows by pane when herdr cannot
+        // yet name the session, so the pane must travel with the entry.
+        pane: Some(agent.pane_id.clone()),
     }
 }
 
@@ -206,6 +209,17 @@ impl PaneSpawner for HerdrPaneSpawner {
             Err(e) => return DeliveryOutcome::Failed(format!("pane.split: {e}")),
         };
 
+        // Park the row on the pane before anything else can go wrong. A new agent often
+        // sits in a trust or channel dialog for a while, and `<harness>:new` is an
+        // address nothing can ever drain; the pane is one the SessionStart hook will
+        // recognise when the agent finally reports its session id.
+        if req.resume.is_none() {
+            let parked = crate::pane::pane_address(req.harness, &pane.pane_id);
+            if let Err(e) = req.store.retarget(&req.message.id, &parked) {
+                tracing::warn!("could not park {} on {parked}: {e}", req.message.id);
+            }
+        }
+
         let short = req.resume.map(|a| a.short()).unwrap_or_else(|| {
             req.message
                 .id
@@ -229,32 +243,31 @@ impl PaneSpawner for HerdrPaneSpawner {
             (Some(_), Harness::Other(_)) | (None, _) => {}
         }
         args.extend(req.extra_args.iter().cloned());
-        // A resumed session owns the message row already, so it will drain it itself.
-        // A brand new session has no address yet — nothing could ever drain a row
-        // addressed to `<harness>:new` — so the envelope goes in as its first prompt.
-        if req.resume.is_none() {
-            args.push(req.envelope.to_string());
-        }
 
         let start = AgentStart::new(name, req.harness.as_str(), &pane.pane_id)
             .args(args)
             .timeout_ms(AGENT_START_TIMEOUT_MS);
         if let Err(e) = self.client.agent_start(&start).await {
-            return DeliveryOutcome::Failed(format!("agent.start: {e}"));
-        }
-
-        if req.resume.is_some() {
+            // Not ready, blocked on a dialog, slow to boot: the pane exists and the row
+            // is addressed to it, so this is a wait, not a failure.
+            tracing::debug!("agent.start on {}: {e}", pane.pane_id);
             return DeliveryOutcome::Queued;
         }
-        // The harness integration may already have reported the new session id; if so
-        // the row can be re-pointed at a real address instead of `<harness>:new`.
-        match self.client.agent_get(&pane.pane_id).await {
-            Ok(agent) => match address_of(&agent) {
-                Some(addr) => DeliveryOutcome::Spawned(addr),
-                None => DeliveryOutcome::Pushed,
-            },
-            Err(_) => DeliveryOutcome::Pushed,
+
+        // herdr may already know the session id, in which case the row can skip the
+        // placeholder and go straight to the real address.
+        if req.resume.is_none() {
+            if let Ok(agent) = self.client.agent_get(&pane.pane_id).await {
+                if let Some(addr) = address_of(&agent) {
+                    if let Err(e) = req.store.retarget(&req.message.id, &addr) {
+                        tracing::warn!("could not retarget {}: {e}", req.message.id);
+                    }
+                }
+            }
         }
+        // Either way the message is waiting for its recipient's own drain: the channel,
+        // the Stop hook, or a prompt once the agent is idle.
+        DeliveryOutcome::Queued
     }
 }
 

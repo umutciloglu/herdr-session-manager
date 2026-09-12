@@ -119,6 +119,7 @@ impl Directory for FakeDirectory {
             state: AgentState::Idle,
             cwd: Some(PathBuf::from("/repo/trade-help")),
             title: Some("fixing the parser".into()),
+            pane: Some("w1:p3".into()),
         }]
     }
 }
@@ -199,12 +200,15 @@ async fn send_queues_for_a_session_that_is_not_running() {
 #[tokio::test]
 async fn send_to_a_live_claude_peer_defers_to_native_messaging() {
     let (store, svc) = service(Harness::Claude);
+    let svc = svc.serving_mcp();
     let mut peer = Registration::new(
         Harness::Claude,
         "7777aaaa-1111-2222-3333-444444444444",
         "/repo",
     );
     peer.alias = Some("planner".into());
+    // Only a peer something can actually reach counts as "use native instead".
+    peer.poke_path = Some("/tmp/agentmail-native-test.sock".into());
     store.register(&peer).expect("register");
 
     let out = svc
@@ -225,9 +229,64 @@ async fn send_to_a_live_claude_peer_defers_to_native_messaging() {
         .is_empty());
 }
 
+/// The CLI, the hooks and every other non-MCP caller have no native messaging to fall
+/// back to, so they must deliver — `use_native` is only an answer an interactive Claude
+/// session can act on.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_cli_path_delivers_to_a_live_claude_peer() {
+    use agentmail_core::PokeListener;
+    use agentmail_delivery::PokeDeliverer;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(Store::open_in_memory().expect("store"));
+    let mut peer = Registration::new(
+        Harness::Claude,
+        "7777aaaa-1111-2222-3333-444444444444",
+        "/repo",
+    );
+    peer.poke_path = Some(dir.path().join("peer.sock").to_string_lossy().into_owned());
+    store.register(&peer).expect("register");
+    let mut listener = PokeListener::bind(&peer).expect("bind");
+
+    let mailbox = Mailbox::new(
+        Arc::clone(&store),
+        Resolver::new(Arc::clone(&store)),
+        vec![Box::new(PokeDeliverer::new())],
+    );
+    // No `serving_mcp()`: this is the shape the CLI builds.
+    let svc = Service::new(
+        identity(Harness::Claude, ME),
+        Arc::clone(&store),
+        mailbox,
+        Config::default(),
+    );
+
+    let woke = tokio::spawn(async move { listener.next().await });
+    let out = svc
+        .call_tool(
+            "agentmail_send",
+            &json!({"to": "claude:7777aaaa", "text": "ping"}),
+        )
+        .await
+        .expect("send");
+
+    assert_eq!(out["outcome"], "queued", "delivered, not deferred: {out}");
+    tokio::time::timeout(std::time::Duration::from_secs(5), woke)
+        .await
+        .expect("the peer should have been poked")
+        .expect("join");
+    assert_eq!(
+        store.pending_for(&peer.address()).expect("pending").len(),
+        1,
+        "the row waits for the peer's own drain"
+    );
+}
+
 #[tokio::test]
 async fn a_codex_caller_never_gets_the_native_hint() {
     let (store, svc) = service(Harness::Codex);
+    let svc = svc.serving_mcp();
     let peer = Registration::new(
         Harness::Claude,
         "7777aaaa-1111-2222-3333-444444444444",
@@ -349,7 +408,7 @@ async fn a_provisional_identity_is_adopted_once_the_hook_row_lands() {
         Resolver::new(Arc::clone(&store)),
         Vec::new(),
     );
-    let mut provisional = identity(Harness::Claude, "unknown-4242");
+    let mut provisional = identity(Harness::Claude, "unk4242");
     provisional.provisional = true;
     provisional.herdr_pane = Some("w1:p3".into());
     let svc = Service::new(provisional, Arc::clone(&store), mailbox, Config::default());
@@ -561,7 +620,7 @@ async fn the_transcript_template_reads_through_the_provider() {
 }
 
 #[tokio::test]
-async fn the_channel_drain_marks_delivered_and_renders_envelopes() {
+async fn the_channel_drain_renders_envelopes_and_leaves_the_row_pending() {
     let (store, svc) = service(Harness::Claude);
     let msg = Message::new(
         Address::new(Harness::Codex, PEER),
@@ -573,11 +632,19 @@ async fn the_channel_drain_marks_delivered_and_renders_envelopes() {
 
     let drained = svc.drain_channel().expect("drain");
     assert_eq!(drained.len(), 1);
+    // Claude only routes channel events to a server the session was launched with as a
+    // channel, and the server cannot tell. Marking it delivered here would lose it.
+    let row = store.get(&msg.id).expect("get").expect("row");
     assert_eq!(
-        store.get(&msg.id).expect("get").expect("row").status,
-        MessageStatus::Delivered
+        row.status,
+        MessageStatus::Pending,
+        "the Stop hook must still be able to hand this over"
     );
-    // A second drain is empty: delivered mail is never pushed twice.
+    assert!(
+        row.pushed_at.is_some(),
+        "the attempt is recorded so the Stop hook can check the transcript for it"
+    );
+    // A second drain is empty: this process does not push the same row twice.
     assert!(svc.drain_channel().expect("drain").is_empty());
 
     let wire = drained[0].notification();
@@ -595,6 +662,29 @@ async fn the_channel_drain_marks_delivered_and_renders_envelopes() {
     assert!(
         content.contains(&format!("agentmail_reply message_id={}", msg.id)),
         "{content}"
+    );
+}
+
+/// A tool call is proof the model is awake with its context in front of it, which is the
+/// only acknowledgement a channel push ever gets.
+#[tokio::test]
+async fn a_tool_call_acknowledges_what_the_channel_pushed() {
+    let (store, svc) = service(Harness::Claude);
+    let msg = Message::new(
+        Address::new(Harness::Codex, PEER),
+        Address::new(Harness::Claude, ME),
+        "the parser is fixed",
+    );
+    store.enqueue(&msg).expect("enqueue");
+    assert_eq!(svc.drain_channel().expect("drain").len(), 1);
+
+    svc.call_tool("agentmail_find_session", &json!({"query": "anything"}))
+        .await
+        .expect("find");
+
+    assert_eq!(
+        store.get(&msg.id).expect("get").expect("row").status,
+        MessageStatus::Read
     );
 }
 

@@ -17,7 +17,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use agentmail_core::{
-    CommandSessionProvider, Config, Mailbox, Paths, PokeListener, Resolver, SessionProvider, Store,
+    Address, CommandSessionProvider, Config, Mailbox, Paths, PokeListener, Resolver,
+    SessionProvider, Store,
 };
 use rmcp::ServiceExt;
 
@@ -87,6 +88,14 @@ pub async fn run() -> Result<(), Error> {
     let store = Arc::new(Store::open_at(&paths)?);
     let cfg = Config::load(&paths)?;
 
+    // Sessions that ended without deregistering leave rows behind; clearing them here
+    // keeps `resources/list` and address resolution honest.
+    match store.prune(chrono::Utc::now()) {
+        Ok(n) if n > 0 => tracing::info!(pruned = n, "dropped stale registry rows"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("prune: {e}"),
+    }
+
     let identity = detect_identity(&store).await;
     if identity.provisional {
         tracing::warn!(
@@ -104,7 +113,8 @@ pub async fn run() -> Result<(), Error> {
     let svc = Arc::new(
         build_service(identity.clone(), Arc::clone(&store), cfg.clone())
             .await
-            .with_signals(Arc::clone(&wake), Arc::clone(&repair)),
+            .with_signals(Arc::clone(&wake), Arc::clone(&repair))
+            .serving_mcp(),
     );
 
     // The wake-up socket exists only where something acts on a poke. Under Codex there
@@ -161,7 +171,7 @@ pub async fn run() -> Result<(), Error> {
 }
 
 /// Owns the wake-up socket, and therefore everything that depends on it: draining the
-/// Claude channel, waking blocked waits, and re-binding when the identity is repaired.
+/// Claude channel, waking blocked waits, and re-binding when the identity changes.
 async fn session_loop(
     svc: Arc<Service>,
     peer: rmcp::service::Peer<rmcp::service::RoleServer>,
@@ -170,8 +180,15 @@ async fn session_loop(
     wake: Arc<Notify>,
     repair: Arc<Notify>,
 ) {
+    // What the current socket answers for. `None` means there is no socket, or it is
+    // bound to an address we have since stopped being.
+    let mut bound = poke
+        .as_ref()
+        .map(|_| svc.identity().address())
+        .filter(|_| !svc.identity().provisional);
+
     push_pending(&svc, &peer).await;
-    repair_identity(&svc, &mut poke);
+    settle_identity(&svc, &mut poke, &mut bound);
 
     loop {
         match poke.as_mut() {
@@ -181,55 +198,47 @@ async fn session_loop(
                     _ = repair.notified() => {}
                 }
             }
-            // No socket (Codex, or a bind that failed): only a repair request can wake
-            // this loop, and there is nothing to re-bind when it does.
+            // No socket (Codex, a failed bind, or an identity we cannot name yet):
+            // only a repair request can wake this loop.
             None => repair.notified().await,
         }
         push_pending(&svc, &peer).await;
-        repair_identity(&svc, &mut poke);
+        settle_identity(&svc, &mut poke, &mut bound);
         // A poke usually means somebody just came or went, so this is the cheapest
         // moment to notice a changed session list.
         notify_changed_resources(&svc, &peer, &seen, false).await;
     }
 }
 
-/// Adopts the real session once its SessionStart row appears: new socket first, then
-/// the registry swap, so nothing can be told an address that has nowhere to knock.
-fn repair_identity(svc: &Service, poke: &mut Option<PokeListener>) {
-    let Some(found) = svc.resolved_identity() else {
-        return;
-    };
-    let previous = svc.identity();
+/// Adopts a real session id if one has appeared, then makes the wake-up socket match
+/// whatever address we answer to now. Both halves are idempotent, so this can run on
+/// every wake-up.
+fn settle_identity(svc: &Service, poke: &mut Option<PokeListener>, bound: &mut Option<Address>) {
+    if let Some(found) = svc.resolved_identity() {
+        let previous = svc.identity();
+        svc.adopt_and_move_mail(&previous, found.clone());
+        tracing::info!(was = %previous.address(), now = %found.address(), "adopted the real session id");
+    }
 
-    let endpoint = match svc.channel_enabled() {
-        true => match PokeListener::bind(&found.registration(None)) {
-            Ok(listener) => {
-                let endpoint = listener.endpoint().to_string();
-                *poke = Some(listener);
-                Some(endpoint)
-            }
-            Err(e) => {
-                tracing::warn!("could not re-bind the poke socket: {e}");
-                None
-            }
-        },
-        false => None,
-    };
-
-    let store = svc.store();
-    if let Err(e) = store.register(&found.registration(endpoint)) {
-        tracing::warn!("could not register {}: {e}", found.address());
+    let me = svc.identity();
+    // Nothing stable to bind to, or nothing that would listen anyway.
+    if me.provisional || !svc.channel_enabled() {
         return;
     }
-    if let Err(e) = store.deregister(&previous.harness, &previous.session_id) {
-        tracing::warn!("could not drop the provisional row: {e}");
+    if bound.as_ref() == Some(&me.address()) {
+        return;
     }
-    svc.adopt_identity(found.clone());
-    tracing::info!(
-        was = %previous.address(),
-        now = %found.address(),
-        "adopted the real session id"
-    );
+    match PokeListener::bind(&me.registration(None)) {
+        Ok(listener) => {
+            let endpoint = listener.endpoint().to_string();
+            *poke = Some(listener);
+            *bound = Some(me.address());
+            if let Err(e) = svc.store().register(&me.registration(Some(endpoint))) {
+                tracing::warn!("could not record the poke socket: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("could not bind the poke socket: {e}"),
+    }
 }
 
 async fn push_pending(svc: &Service, peer: &rmcp::service::Peer<rmcp::service::RoleServer>) {
@@ -257,6 +266,10 @@ async fn touch_loop(svc: Arc<Service>, store: Arc<Store>, repair: Arc<Notify>) {
         let me = svc.identity();
         if let Err(e) = store.touch(&me.harness, &me.session_id) {
             tracing::warn!("touch: {e}");
+        }
+        // Cheap, and the only sweep a long-lived session ever gets.
+        if let Err(e) = store.prune(chrono::Utc::now()) {
+            tracing::debug!("prune: {e}");
         }
         // Still anonymous? The hook row may exist by now.
         if me.provisional {

@@ -7,6 +7,7 @@
 
 pub mod error;
 pub mod hooks;
+pub mod pane;
 pub mod poke_deliverer;
 pub mod provider;
 pub mod router;
@@ -17,6 +18,7 @@ pub mod herdr;
 
 pub use error::{Error, Result};
 pub use hooks::{drain_stop, session_start, session_start_in, HookInput};
+pub use pane::{pane_address, pane_of};
 pub use poke_deliverer::PokeDeliverer;
 pub use provider::{resolve_argv, resolve_argv_in};
 pub use router::{default_deliverers, HerdrHandle};

@@ -3,6 +3,7 @@ mod common;
 use std::path::PathBuf;
 
 use agentmail_core::domain::{Address, Harness, Message, MessageStatus, Registration};
+use agentmail_core::store::{Liveness, HOOK_ROW_TTL, PRUNE_AFTER};
 use agentmail_core::{Paths, Store};
 use common::FakeProbe;
 
@@ -22,13 +23,13 @@ fn opens_and_migrates_on_disk() {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = Paths::new(dir.path());
     let store = Store::open_at(&paths).expect("open");
-    assert_eq!(store.schema_version().expect("version"), 1);
+    assert_eq!(store.schema_version().expect("version"), 2);
     assert!(paths.db().exists());
 
     // Re-opening an existing db must be a no-op, not a failed migration.
     drop(store);
     let store = Store::open_at(&paths).expect("reopen");
-    assert_eq!(store.schema_version().expect("version"), 1);
+    assert_eq!(store.schema_version().expect("version"), 2);
 }
 
 #[test]
@@ -201,8 +202,14 @@ fn registry_round_trip_and_upsert() {
         .is_none());
 }
 
+fn hook_row(harness: Harness, id: &str, age: chrono::Duration) -> Registration {
+    let mut reg = Registration::new(harness, id, PathBuf::from("/h"));
+    reg.last_seen -= age;
+    reg
+}
+
 #[test]
-fn live_drops_dead_pids_and_keeps_pidless_rows() {
+fn live_drops_dead_pids_and_keeps_fresh_pidless_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_at(&Paths::new(dir.path()))
         .expect("open")
@@ -287,4 +294,245 @@ fn prefix_and_alias_lookup() {
     assert!(store
         .set_alias(&Harness::Claude, "missing", Some("x"))
         .is_err());
+}
+
+#[test]
+fn liveness_classifies_every_kind_of_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_at(&Paths::new(dir.path()))
+        .expect("open")
+        .with_probe(Box::new(FakeProbe(vec![100])));
+
+    let mut proven = Registration::new(Harness::Claude, "proven", PathBuf::from("/a"));
+    proven.pid = Some(100);
+    let mut dead = Registration::new(Harness::Claude, "dead", PathBuf::from("/a"));
+    dead.pid = Some(999);
+
+    assert_eq!(store.liveness(&proven), Liveness::Proven);
+    assert_eq!(store.liveness(&dead), Liveness::Gone);
+    assert_eq!(
+        store.liveness(&hook_row(
+            Harness::Codex,
+            "fresh",
+            chrono::Duration::minutes(1)
+        )),
+        Liveness::Unproven
+    );
+    assert_eq!(
+        store.liveness(&hook_row(
+            Harness::Codex,
+            "stale",
+            HOOK_ROW_TTL + chrono::Duration::seconds(1)
+        )),
+        Liveness::Gone
+    );
+    // A person is never a process.
+    assert_eq!(
+        store.liveness(&hook_row(
+            Harness::Other(Harness::HUMAN.into()),
+            "umut",
+            chrono::Duration::zero()
+        )),
+        Liveness::Gone
+    );
+}
+
+#[test]
+fn live_ignores_a_stale_hook_row_but_keeps_it_addressable() {
+    let (_dir, store) = temp_store();
+    let stale = hook_row(
+        Harness::Codex,
+        "closed-pane",
+        HOOK_ROW_TTL + chrono::Duration::minutes(1),
+    );
+    store.register(&stale).expect("register");
+
+    assert!(store.live().expect("live").is_empty());
+    // Not live is not gone: the session is still a valid offline target.
+    assert!(store
+        .get_registration(&Harness::Codex, "closed-pane")
+        .expect("get")
+        .is_some());
+    assert_eq!(store.registrations().expect("all").len(), 1);
+}
+
+#[test]
+fn live_never_includes_a_human_row() {
+    let (_dir, store) = temp_store();
+    store
+        .register(&hook_row(
+            Harness::Other(Harness::HUMAN.into()),
+            "umut",
+            chrono::Duration::zero(),
+        ))
+        .expect("register");
+
+    assert!(store.live().expect("live").is_empty());
+    assert_eq!(store.registrations().expect("all").len(), 1);
+}
+
+#[test]
+fn prune_drops_dead_pids_and_expired_hook_rows_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_at(&Paths::new(dir.path()))
+        .expect("open")
+        .with_probe(Box::new(FakeProbe(vec![100])));
+
+    let mut alive = Registration::new(Harness::Claude, "alive", PathBuf::from("/a"));
+    alive.pid = Some(100);
+    let mut dead = Registration::new(Harness::Claude, "dead", PathBuf::from("/a"));
+    dead.pid = Some(999);
+    let recent = hook_row(Harness::Codex, "recent", chrono::Duration::hours(1));
+    let expired = hook_row(
+        Harness::Codex,
+        "expired",
+        PRUNE_AFTER + chrono::Duration::hours(1),
+    );
+    // Old enough to prune on age alone, but a reply sink must survive.
+    let human = hook_row(
+        Harness::Other(Harness::HUMAN.into()),
+        "umut",
+        chrono::Duration::days(90),
+    );
+
+    for r in [&alive, &dead, &recent, &expired, &human] {
+        store.register(r).expect("register");
+    }
+
+    assert_eq!(store.prune(chrono::Utc::now()).expect("prune"), 2);
+
+    let mut left: Vec<_> = store
+        .registrations()
+        .expect("all")
+        .into_iter()
+        .map(|r| r.session_id)
+        .collect();
+    left.sort();
+    assert_eq!(left, vec!["alive", "recent", "umut"]);
+
+    // Idempotent: a second sweep finds nothing new.
+    assert_eq!(store.prune(chrono::Utc::now()).expect("prune"), 0);
+}
+
+// ---- migrations ------------------------------------------------------------------
+//
+// Two processes open the store within the same second all the time: a CLI send and an
+// MCP server starting up. Both must come out with a current schema.
+
+/// A genuine v1 database: the schema as it shipped, with no `pushed_at` column.
+fn write_v1_fixture(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).expect("open fixture");
+    conn.execute_batch(
+        "CREATE TABLE messages (
+           id            TEXT PRIMARY KEY,
+           from_addr     TEXT NOT NULL,
+           to_addr       TEXT NOT NULL,
+           text          TEXT NOT NULL,
+           reply_to      TEXT,
+           expects_reply INTEGER NOT NULL DEFAULT 0,
+           status        TEXT NOT NULL,
+           created_at    TEXT NOT NULL,
+           delivered_at  TEXT,
+           error         TEXT
+         );
+         CREATE TABLE registry (
+           harness    TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           alias      TEXT,
+           pid        INTEGER,
+           cwd        TEXT NOT NULL,
+           poke_path  TEXT,
+           herdr_pane TEXT,
+           started_at TEXT NOT NULL,
+           last_seen  TEXT NOT NULL,
+           PRIMARY KEY (harness, session_id)
+         );
+         CREATE TABLE cursors (address TEXT PRIMARY KEY, last_read_id TEXT);",
+    )
+    .expect("v1 schema");
+    conn.pragma_update(None, "user_version", 1i64)
+        .expect("user_version");
+}
+
+#[test]
+fn migrating_a_v1_db_twice_is_a_no_op_the_second_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("agentmail.sqlite");
+    write_v1_fixture(&path);
+
+    let store = Store::open(&path).expect("first open");
+    assert_eq!(store.schema_version().expect("version"), 2);
+    drop(store);
+
+    let store = Store::open(&path).expect("second open");
+    assert_eq!(store.schema_version().expect("version"), 2);
+
+    // The migrated schema is usable, not just versioned.
+    let me = addr(Harness::Claude, "me");
+    let msg = Message::new(addr(Harness::Codex, "peer"), me.clone(), "hi");
+    store.enqueue(&msg).expect("enqueue");
+    assert_eq!(store.pending_for(&me).expect("pending").len(), 1);
+}
+
+#[test]
+fn a_column_already_added_at_v1_migrates_cleanly() {
+    // What a pre-transactional partial run left behind: the column is there but the
+    // version bump never landed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("agentmail.sqlite");
+    write_v1_fixture(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.execute_batch("ALTER TABLE messages ADD COLUMN pushed_at TEXT;")
+            .expect("add column");
+        conn.pragma_update(None, "user_version", 1i64)
+            .expect("stay at v1");
+    }
+
+    let store = Store::open(&path).expect("open over a half-applied migration");
+    assert_eq!(store.schema_version().expect("version"), 2);
+}
+
+#[test]
+fn concurrent_opens_of_a_v1_db_all_succeed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("agentmail.sqlite");
+    write_v1_fixture(&path);
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| Store::open(&path).map(|s| s.schema_version())))
+            .collect();
+        for h in handles {
+            let version = h
+                .join()
+                .expect("thread panicked")
+                .expect("open")
+                .expect("version");
+            assert_eq!(version, 2);
+        }
+    });
+}
+
+#[test]
+fn opening_waits_out_a_held_write_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("agentmail.sqlite");
+    write_v1_fixture(&path);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut conn = rusqlite::Connection::open(&path).expect("open");
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("begin immediate");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            tx.commit().expect("commit");
+        });
+
+        // Well inside the 5 s busy timeout, so this waits rather than failing.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let store = Store::open(&path).expect("open against a held write lock");
+        assert_eq!(store.schema_version().expect("version"), 2);
+    });
 }

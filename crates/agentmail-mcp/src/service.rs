@@ -4,8 +4,9 @@
 //! resources and the Claude channel lives here so it can be tested against an in-memory
 //! store without speaking JSON-RPC.
 
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use agentmail_core::{
@@ -30,6 +31,9 @@ const RECENT_RESOURCES: usize = 40;
 const MAX_WAIT_S: u64 = 3600;
 const DEFAULT_WAIT_S: u64 = 300;
 const MAX_FIND_LIMIT: usize = 10;
+/// How hard a tool call tries to find out who it belongs to before answering anyway.
+const REPAIR_ATTEMPTS: usize = 3;
+const REPAIR_PAUSE: Duration = Duration::from_millis(700);
 
 /// Told to the model once, at initialize. Kept short: it competes with the user's
 /// own prompt for attention.
@@ -200,6 +204,15 @@ pub struct Service {
     /// Asks that owner to retry the identity lookup: it is the only writer, because it
     /// is the only thing that can re-bind the socket the new address needs.
     repair: Option<Arc<Notify>>,
+    /// True only when this service is answering MCP tool calls for an interactive
+    /// session. Claude's own session messaging exists there and nowhere else, so only
+    /// there may a send be turned down in favour of it.
+    serving_mcp: bool,
+    /// Rows this process has pushed over the channel and not yet seen acknowledged.
+    /// They stay `Pending` in the store: a channel notification is only delivered if
+    /// the session was launched with channels enabled, which the server cannot know,
+    /// and a row marked delivered that nobody read is a lost message.
+    pushed: Mutex<HashSet<String>>,
 }
 
 impl Service {
@@ -214,7 +227,16 @@ impl Service {
             directory: None,
             wake: None,
             repair: None,
+            serving_mcp: false,
+            pushed: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Marks this service as the one behind the MCP tools. The CLI and the hooks build
+    /// the same service and must always deliver.
+    pub fn serving_mcp(mut self) -> Self {
+        self.serving_mcp = true;
+        self
     }
 
     /// `wake` is rung on every poke; `repair` asks for an identity retry.
@@ -293,15 +315,126 @@ impl Service {
     }
 
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Value, ServiceError> {
-        // A tool call is a sign of life from the harness: a good moment to find out
-        // whether the hook row we were missing at startup exists now.
-        self.request_repair();
-        match name {
+        // A tool call proves the model is awake and has its context in front of it, so
+        // anything this process pushed over the channel has been seen.
+        self.acknowledge_pushed();
+        // It is also the last moment to find out who we are before we put an address on
+        // outgoing mail, so this waits rather than nudging a background task.
+        self.repair_identity_now().await;
+        let mut result = match name {
             "agentmail_send" => self.send(args).await,
             "agentmail_reply" => self.reply(args).await,
             "agentmail_wait" => self.wait(args).await,
             "agentmail_find_session" => self.find_session(args).await,
             other => Err(ServiceError::UnknownTool(other.to_string())),
+        };
+        // Anything sent while still anonymous may never get its answer back, and the
+        // model is the only one who can work around that.
+        if let (Ok(value), Some(note)) = (&mut result, self.provisional_warning()) {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("warning".into(), json!(note));
+            }
+        }
+        result
+    }
+
+    /// The recipient has to be told too: they are about to answer an address that may
+    /// not exist, and only they can decide to reply some other way.
+    fn annotate(&self, text: &str) -> String {
+        match self.provisional_warning() {
+            Some(note) => format!("{text}\n\n[agentmail] {note}"),
+            None => text.to_string(),
+        }
+    }
+
+    /// A provisional identity is a guess; a message sent under one is addressed from a
+    /// session that will not exist a minute from now.
+    fn provisional_warning(&self) -> Option<String> {
+        let me = self.identity();
+        me.provisional.then(|| {
+            format!(
+                "this session could not identify itself ({}), so a reply may not reach it",
+                me.address()
+            )
+        })
+    }
+
+    /// Retries the identity lookup inline, using herdr's view of our own pane first.
+    /// Returns the adopted identity, or `None` when we are still anonymous.
+    pub async fn repair_identity_now(&self) -> Option<Identity> {
+        if !self.identity().provisional {
+            return None;
+        }
+        for attempt in 0..REPAIR_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(REPAIR_PAUSE).await;
+            }
+            self.refresh_directory().await;
+            let me = self.identity();
+            let found = self
+                .pane_address()
+                .map(|addr| me.adopted(addr))
+                .or_else(|| me.reresolve(&self.store));
+            if let Some(next) = found {
+                self.adopt_and_move_mail(&me, next.clone());
+                // The socket still answers on the old address; its owner re-binds it.
+                if let Some(repair) = &self.repair {
+                    repair.notify_one();
+                }
+                return Some(next);
+            }
+        }
+        None
+    }
+
+    /// The session herdr says is running in our own pane.
+    fn pane_address(&self) -> Option<Address> {
+        let pane = self.identity().herdr_pane?;
+        let dir = self.directory.as_ref()?;
+        dir.as_directory()
+            .live_agents()
+            .into_iter()
+            .find(|e| e.pane.as_deref() == Some(pane.as_str()))
+            .and_then(|e| e.address)
+    }
+
+    /// Adopts `next` and takes the mail with it: rows written under the provisional
+    /// address would otherwise be stranded on a session that never existed.
+    pub fn adopt_and_move_mail(&self, previous: &Identity, next: Identity) {
+        if let Err(e) = self.store.register(&next.registration(None)) {
+            tracing::warn!("could not register {}: {e}", next.address());
+            return;
+        }
+        match self
+            .store
+            .retarget_address(&previous.address(), &next.address())
+        {
+            Ok(moved) if moved > 0 => {
+                tracing::info!(moved, "moved mail to the real session address")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("could not move mail: {e}"),
+        }
+        if let Err(e) = self
+            .store
+            .deregister(&previous.harness, &previous.session_id)
+        {
+            tracing::warn!("could not drop the provisional row: {e}");
+        }
+        self.adopt_identity(next);
+    }
+
+    /// A tool call means the model has its context; the channel did its job.
+    fn acknowledge_pushed(&self) {
+        let ids: Vec<String> = {
+            let mut pushed = self.pushed.lock().unwrap_or_else(|e| e.into_inner());
+            pushed.drain().collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        if let Err(e) = self.store.mark_read(&ids) {
+            tracing::warn!("could not mark pushed mail read: {e}");
         }
     }
 
@@ -331,7 +464,7 @@ impl Service {
         };
         let result = self
             .mailbox
-            .send(&me, &target, &text, opts, &self.ctx(&me))
+            .send(&me, &target, &self.annotate(&text), opts, &self.ctx(&me))
             .await?;
         Ok(send_json(&result))
     }
@@ -344,13 +477,18 @@ impl Service {
         target: &AddressTarget,
         me: &Address,
     ) -> Result<Option<Value>, ServiceError> {
-        if self.identity().harness != Harness::Claude {
+        if !self.serving_mcp || self.identity().harness != Harness::Claude {
             return Ok(None);
         }
         let Resolved::Live(reg, entry) = self.resolver.resolve(target, &self.ctx(me))? else {
             return Ok(None);
         };
         if reg.harness != Harness::Claude || reg.address() == *me {
+            return Ok(None);
+        }
+        // A registration nothing can reach — no wake-up socket, not on screen — is not
+        // a session the model can message natively either.
+        if reg.poke_path.is_none() && entry.is_none() {
             return Ok(None);
         }
         let alias = reg
@@ -374,7 +512,7 @@ impl Service {
         let me = self.me();
         let result = self
             .mailbox
-            .reply(&me, &message_id, &text, &self.ctx(&me))
+            .reply(&me, &message_id, &self.annotate(&text), &self.ctx(&me))
             .await?;
         Ok(send_json(&result))
     }
@@ -609,20 +747,33 @@ impl Service {
 
     // ---- channel -----------------------------------------------------------
 
-    /// Take everything pending for this session and mark it delivered. The caller is
-    /// the only thing that can actually show it to the model, so it drains here and
-    /// pushes one notification per message.
+    /// Everything pending for this session that this process has not already pushed.
+    ///
+    /// The rows stay `Pending` on purpose. Claude only routes channel notifications to a
+    /// server the session was launched with as a channel, and nothing in the protocol
+    /// tells the server whether that happened — so a row marked delivered here could be
+    /// one nobody ever saw. Instead the attempt is stamped with `pushed_at`: the Stop
+    /// hook looks the id up in the transcript and only repeats what never arrived. The
+    /// in-process set stops this loop pushing the same row on every poke, and a later
+    /// tool call marks them read.
     pub fn drain_channel(&self) -> Result<Vec<ChannelMessage>, ServiceError> {
         if !self.channel_enabled() {
             return Ok(Vec::new());
         }
         let pending = self.store.pending_for(&self.me())?;
-        if pending.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids: Vec<String> = pending.iter().map(|m| m.id.clone()).collect();
-        self.store.mark_delivered(&ids)?;
-        Ok(pending.iter().map(ChannelMessage::of).collect())
+        let mut pushed = self.pushed.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh: Vec<Message> = pending
+            .into_iter()
+            .filter(|m| pushed.insert(m.id.clone()))
+            .collect();
+        drop(pushed);
+
+        // Recorded, not assumed: the Stop hook checks the transcript for these ids
+        // before handing them over again, so a session that really did read the
+        // notification is never told twice.
+        let ids: Vec<String> = fresh.iter().map(|m| m.id.clone()).collect();
+        self.store.mark_pushed(&ids)?;
+        Ok(fresh.iter().map(ChannelMessage::of).collect())
     }
 }
 

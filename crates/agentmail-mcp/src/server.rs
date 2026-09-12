@@ -43,6 +43,37 @@ pub fn channel_notification(params: Value) -> ServerNotification {
     ServerNotification::CustomNotification(CustomNotification::new(CHANNEL_METHOD, Some(params)))
 }
 
+/// One JSON line per handshake in `<state>/diagnostics.jsonl`, capped so it cannot grow
+/// without bound. Diagnostics only: nothing reads it back.
+fn record_handshake(request: &InitializeRequestParams) {
+    let entry = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "protocol_version": request.protocol_version.as_str(),
+        "client": serde_json::to_value(&request.client_info).unwrap_or(Value::Null),
+        "capabilities": serde_json::to_value(&request.capabilities).unwrap_or(Value::Null),
+    });
+    tracing::debug!(%entry, "client handshake");
+
+    let Ok(paths) = agentmail_core::Paths::from_env() else {
+        return;
+    };
+    let path = paths.root().join("diagnostics.jsonl");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > DIAGNOSTICS_MAX) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{entry}");
+    }
+}
+
+/// 256 KiB of handshakes is thousands of them; past that the file starts over.
+const DIAGNOSTICS_MAX: u64 = 256 * 1024;
+
 #[derive(Clone)]
 pub struct AgentmailServer {
     svc: Arc<Service>,
@@ -57,6 +88,22 @@ impl AgentmailServer {
 impl ServerHandler for AgentmailServer {
     fn get_info(&self) -> ServerInfo {
         server_info(&self.svc.identity().harness)
+    }
+
+    /// Records what the client said about itself before answering.
+    ///
+    /// Whether Claude actually routes `notifications/claude/channel` to this server
+    /// depends on how the session was launched, and nothing in `initialize` obviously
+    /// says so. Keeping every handshake makes a channel-enabled session comparable with
+    /// a plain one, which is the only way to find out.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        record_handshake(&request);
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
     }
 
     async fn list_tools(

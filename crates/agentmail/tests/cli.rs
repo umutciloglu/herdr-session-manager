@@ -137,6 +137,63 @@ fn a_message_queued_by_send_comes_back_out_of_the_stop_hook() {
     assert!(out.stdout.is_empty(), "empty stdout means carry on");
 }
 
+/// hsm's ask popup polls this, so the shape is a contract: every field present, oldest
+/// first.
+#[test]
+fn inbox_json_is_a_stable_shape() {
+    let home = tempfile::tempdir().expect("home");
+    let state = tempfile::tempdir().expect("state");
+    let to = format!("codex:{CODEX_ID}");
+
+    for text in ["first", "second"] {
+        let sent = agentmail(home.path(), state.path())
+            .args([
+                "send",
+                &to,
+                text,
+                "--from",
+                "human:tester",
+                "--expects-reply",
+            ])
+            .output()
+            .expect("run send");
+        assert!(sent.status.success());
+    }
+
+    let out = agentmail(home.path(), state.path())
+        .args(["inbox", "--addr", &to, "--json"])
+        .output()
+        .expect("run inbox");
+    let listed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("inbox --json is json");
+
+    assert_eq!(listed["address"], to);
+    let rows = listed["messages"].as_array().expect("messages");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["text"], "first", "oldest first");
+    assert_eq!(rows[1]["text"], "second");
+    for row in rows {
+        for field in [
+            "id",
+            "from",
+            "to",
+            "text",
+            "reply_to",
+            "expects_reply",
+            "status",
+            "created_at",
+            "delivered_at",
+            "pushed_at",
+        ] {
+            assert!(row.get(field).is_some(), "{field} missing from {row}");
+        }
+        assert_eq!(row["from"], "human:tester");
+        assert_eq!(row["expects_reply"], true);
+        assert_eq!(row["status"], "pending");
+        assert_eq!(row["reply_to"], serde_json::Value::Null);
+    }
+}
+
 #[test]
 fn the_session_start_hook_makes_a_session_addressable() {
     let home = tempfile::tempdir().expect("home");

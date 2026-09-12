@@ -74,6 +74,8 @@ pub struct PaneRequest<'a> {
     /// Set when the target is a known-but-offline session that should be resumed.
     pub resume: Option<&'a Address>,
     pub extra_args: &'a [String],
+    /// So the row can be re-pointed at the pane before the agent has an id.
+    pub store: &'a Store,
 }
 
 #[async_trait]
@@ -255,14 +257,35 @@ impl Spawner {
         DeliveryOutcome::Replied { reply, from }
     }
 
+    /// Marks any reply the spawned session sent for `msg` as read, so it never reaches
+    /// the sender's inbox twice.
+    fn swallow_replies(&self, msg: &Message) {
+        loop {
+            match self.store.next_for(&msg.from, Some(&msg.id)) {
+                Ok(Some(reply)) => {
+                    if self
+                        .store
+                        .mark_read(std::slice::from_ref(&reply.id))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    tracing::debug!(%reply.id, "dropped a duplicate reply from a one-shot run");
+                }
+                _ => return,
+            }
+        }
+    }
+
     async fn background(
         &self,
         harness: &Harness,
         message: &Message,
+        envelope: &str,
         resume: Option<&Address>,
     ) -> DeliveryOutcome {
         match harness {
-            Harness::Claude => self.background_claude(message, resume).await,
+            Harness::Claude => self.background_claude(message, envelope, resume).await,
             // Codex has no detached mode; failing lets the chain (or an explicit
             // --mode ask) pick something that works.
             Harness::Codex => DeliveryOutcome::Failed("codex has no background mode".into()),
@@ -275,6 +298,7 @@ impl Spawner {
     async fn background_claude(
         &self,
         message: &Message,
+        envelope: &str,
         resume: Option<&Address>,
     ) -> DeliveryOutcome {
         let mut args = vec!["--bg".to_string()];
@@ -285,6 +309,11 @@ impl Spawner {
             env.push((SESSION_ENV.to_string(), addr.id.clone()));
         }
         args.extend(self.extra_args(&Harness::Claude).iter().cloned());
+        // `claude [options] [prompt]`: the envelope goes in as the session's first
+        // prompt. Handing it over here is the only delivery that does not depend on the
+        // new session loading this server as a channel — which it only does when the
+        // human launched it with the channel flag.
+        args.push(envelope.to_string());
 
         let spec = CommandSpec {
             program: "claude".into(),
@@ -304,21 +333,25 @@ impl Spawner {
             ));
         }
 
-        let Some(id) = session_id_in(&out.stdout).or_else(|| resume.map(|a| a.id.clone())) else {
-            return DeliveryOutcome::Failed("claude --bg printed no session id".into());
-        };
-
         // The row still says `claude:new`; re-point it at the session that was just
-        // started, then leave it Pending. That new session's MCP process or Stop hook
-        // is what finally hands the message to the model — which is also why this is
-        // `Queued` and not `Spawned`: `Spawned` would mark the row delivered and the
-        // drain would skip it.
-        let addr = Address::new(Harness::Claude, id);
-        if let Err(e) = self.store.retarget(&message.id, &addr) {
-            return DeliveryOutcome::Failed(format!("retarget {}: {e}", message.id));
+        // started so the inbox reads true and a reply has somewhere to go.
+        if let Some(id) = session_id_in(&out.stdout).or_else(|| resume.map(|a| a.id.clone())) {
+            let addr = Address::new(Harness::Claude, id);
+            if let Err(e) = self.store.retarget(&message.id, &addr) {
+                tracing::warn!("could not retarget {}: {e}", message.id);
+            }
         }
-        DeliveryOutcome::Queued
+        // The prompt went with the launch, so this really is delivered.
+        DeliveryOutcome::Pushed
     }
+}
+
+/// The copy a one-shot child sees: no "reply with agentmail_reply" line, because its
+/// stdout *is* the reply.
+fn answered_inline(msg: &Message) -> Message {
+    let mut msg = msg.clone();
+    msg.expects_reply = false;
+    msg
 }
 
 /// `Auto` is the only mode a model ever needs to think about; this is where it turns
@@ -450,10 +483,28 @@ impl Deliverer for Spawner {
             _ => return DeliveryOutcome::Queued,
         };
 
-        let envelope = Envelope::render(req.message, None);
-        match effective_mode(req.mode, &harness, req.message.expects_reply) {
-            SendMode::Ask => self.ask(&harness, req.message, &envelope, resume).await,
-            SendMode::Background => self.background(&harness, req.message, resume).await,
+        let mode = effective_mode(req.mode, &harness, req.message.expects_reply);
+        // A one-shot child answers on stdout, and that answer is what the caller gets.
+        // Asking it to reply through agentmail as well would deliver the same words
+        // twice — once inline, once as a row the sender has to read later.
+        let envelope = match mode {
+            SendMode::Ask => Envelope::render(&answered_inline(req.message), None),
+            _ => Envelope::render(req.message, None),
+        };
+        match mode {
+            SendMode::Ask => {
+                let outcome = self.ask(&harness, req.message, &envelope, resume).await;
+                if matches!(outcome, DeliveryOutcome::Replied { .. }) {
+                    // Belt and braces: an older child, or one that ignores the envelope,
+                    // may still have sent a reply row. The caller already has the answer.
+                    self.swallow_replies(req.message);
+                }
+                outcome
+            }
+            SendMode::Background => {
+                self.background(&harness, req.message, &envelope, resume)
+                    .await
+            }
             SendMode::Pane => match &self.pane {
                 Some(pane) => {
                     pane.spawn_pane(PaneRequest {
@@ -462,6 +513,7 @@ impl Deliverer for Spawner {
                         envelope: &envelope,
                         resume,
                         extra_args: self.extra_args(&harness),
+                        store: &self.store,
                     })
                     .await
                 }

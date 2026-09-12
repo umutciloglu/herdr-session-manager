@@ -244,7 +244,7 @@ async fn codex_output_that_is_not_json_is_still_an_answer() {
 }
 
 #[tokio::test]
-async fn background_claude_retargets_the_row_and_queues_it() {
+async fn background_claude_hands_the_envelope_to_the_new_session() {
     let runner = FakeRunner::answering("Started session 7c7c7c7c-1111-2222-3333-444444444444\n");
     let store = store();
     let spawner =
@@ -259,11 +259,95 @@ async fn background_claude_retargets_the_row_and_queues_it() {
         SendMode::Auto,
     )
     .await;
-    assert_eq!(outcome, DeliveryOutcome::Queued);
-    assert_eq!(runner.last().args[0], "--bg");
+    // The envelope went in as the session's first prompt, so it really is delivered —
+    // no dependency on the new session loading us as a channel.
+    assert_eq!(outcome, DeliveryOutcome::Pushed);
 
+    let spec = runner.last();
+    assert_eq!(spec.args[0], "--bg");
+    assert!(
+        spec.args
+            .last()
+            .expect("a prompt")
+            .starts_with("[agentmail] from"),
+        "{:?}",
+        spec.args
+    );
+
+    // The row is re-pointed at the session that was started, so a reply has somewhere
+    // to go and the inbox reads true.
     let spawned = Address::new(Harness::Claude, "7c7c7c7c-1111-2222-3333-444444444444");
-    assert_eq!(store.pending_for(&spawned).expect("pending").len(), 1);
+    assert_eq!(
+        store
+            .get(&msg.id)
+            .expect("get")
+            .expect("row")
+            .to
+            .to_string(),
+        spawned.to_string()
+    );
+}
+
+#[tokio::test]
+async fn a_one_shot_child_is_never_asked_to_reply_by_mail() {
+    let runner = FakeRunner::answering(
+        r#"{"result":"done","session_id":"ffff0000-1111-2222-3333-444444444444"}"#,
+    );
+    let spawner = Spawner::new(store(), SpawnConfig::default()).with_runner(runner.clone());
+    // expects_reply is true: the caller wants an answer, and gets it from stdout.
+    let msg = message(Address::new(Harness::Claude, "new"), true);
+
+    deliver(
+        &spawner,
+        &msg,
+        &Resolved::Spawn(Harness::Claude),
+        SendMode::Ask,
+    )
+    .await;
+
+    let envelope = runner.last().args[1].clone();
+    assert!(envelope.contains("[agentmail] from"), "{envelope}");
+    assert!(
+        !envelope.contains("agentmail_reply"),
+        "a one-shot answers on stdout; asking for mail too delivers it twice: {envelope}"
+    );
+    assert!(!envelope.contains("reply expected"), "{envelope}");
+}
+
+#[tokio::test]
+async fn a_duplicate_reply_from_a_one_shot_is_swallowed() {
+    let runner = FakeRunner::answering(
+        r#"{"result":"PONG","session_id":"ffff0000-1111-2222-3333-444444444444"}"#,
+    );
+    let store = store();
+    let spawner =
+        Spawner::new(Arc::clone(&store), SpawnConfig::default()).with_runner(runner.clone());
+    let msg = message(Address::new(Harness::Codex, "new"), true);
+    store.enqueue(&msg).expect("enqueue");
+
+    // The spawned session also sent the answer as mail, the way an older child would.
+    let echo = Message::new(
+        Address::new(Harness::Codex, "01999b0e-2222-4444-8888-cccccccccccc"),
+        msg.from.clone(),
+        "PONG",
+    )
+    .in_reply_to(Some(msg.id.clone()));
+    store.enqueue(&echo).expect("enqueue");
+
+    let outcome = deliver(
+        &spawner,
+        &msg,
+        &Resolved::Spawn(Harness::Codex),
+        SendMode::Ask,
+    )
+    .await;
+    assert!(matches!(outcome, DeliveryOutcome::Replied { .. }));
+    assert_eq!(
+        store.get(&echo.id).expect("get").expect("row").status,
+        agentmail_core::MessageStatus::Read,
+        "the caller already has this answer"
+    );
+    assert!(store.inbox(&msg.from, false, 10).expect("inbox").is_empty());
 }
 
 #[tokio::test]

@@ -42,6 +42,14 @@ height = "80%"
 command = ["./target/release/hsm", "browse"]
 
 [[panes]]
+id = "asker"
+title = "Ask a session"
+placement = "popup"
+width = "85%"
+height = "60%"
+command = ["./target/release/hsm", "ask"]
+
+[[panes]]
 id = "chat-setup"
 title = "Agent chat setup"
 placement = "popup"
@@ -62,6 +70,20 @@ platforms = ["windows"]
 title = "Browse agent sessions"
 description = "Search past and live agent sessions; open one in this pane, a split, or a tab."
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/browse.ps1"]
+
+[[actions]]
+id = "ask"
+platforms = ["linux", "macos"]
+title = "Ask an agent session"
+description = "Pick a past or live agent session and send it a question; the answer comes back to you."
+command = ["/bin/sh", "scripts/ask.sh"]
+
+[[actions]]
+id = "ask-windows"
+platforms = ["windows"]
+title = "Ask an agent session"
+description = "Pick a past or live agent session and send it a question; the answer comes back to you."
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/ask.ps1"]
 
 [[actions]]
 id = "setup-chat"

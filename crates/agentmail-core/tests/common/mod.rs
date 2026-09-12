@@ -38,6 +38,14 @@ pub fn entry(address: Option<Address>, alias: Option<&str>, state: AgentState) -
         state,
         cwd: Some("/work".into()),
         title: Some("some title".into()),
+        pane: None,
+    }
+}
+
+pub fn pane_entry(pane: &str, state: AgentState) -> DirectoryEntry {
+    DirectoryEntry {
+        pane: Some(pane.to_string()),
+        ..entry(None, None, state)
     }
 }
 

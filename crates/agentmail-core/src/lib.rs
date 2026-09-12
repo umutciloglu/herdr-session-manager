@@ -25,7 +25,7 @@ pub use mailbox::{Mailbox, SendOpts, SendOutcome, SendResult};
 pub use paths::Paths;
 pub use poke::{PokeListener, Poker};
 pub use resolver::{ResolveCtx, Resolved, Resolver};
-pub use store::Store;
+pub use store::{Liveness, Store, HOOK_ROW_TTL, PRUNE_AFTER};
 pub use traits::{
     AgentState, CommandSessionProvider, Deliverer, DeliveryOutcome, DeliveryRequest, Directory,
     DirectoryEntry, ProcessProbe, SessionProvider,

@@ -10,6 +10,7 @@ mod cli;
 mod commands;
 mod herdr_adapter;
 mod runtime;
+mod seen;
 
 fn main() -> std::process::ExitCode {
     cli::main()

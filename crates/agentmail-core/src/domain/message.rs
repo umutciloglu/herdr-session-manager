@@ -74,6 +74,12 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<DateTime<Utc>>,
+    /// When this message was pushed over a channel. Delivery over a channel is not
+    /// proof of arrival — Claude only routes channel events to a server the session was
+    /// launched with as a channel — so the row stays pending and this records the
+    /// attempt, which the Stop hook checks against the transcript before repeating it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -91,6 +97,7 @@ impl Message {
             status: MessageStatus::Pending,
             created_at: ids::now(),
             delivered_at: None,
+            pushed_at: None,
             error: None,
         }
     }

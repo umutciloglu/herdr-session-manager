@@ -1,0 +1,89 @@
+# Builds hsm and agentmail for every platform the plugin's fetch-or-build script knows
+# about, and publishes them with the checksums that script verifies. Tag a version
+# (`git tag v0.1.0 && git push --tags`) and the release appears with:
+#   hsm-<triple>, agentmail-<triple>, SHA256SUMS, COMMIT
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.triple }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: aarch64-apple-darwin
+            os: macos-14
+          - triple: x86_64-apple-darwin
+            os: macos-13
+          - triple: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - triple: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.triple }}
+
+      # musl needs a cross linker; everything else builds with the host toolchain.
+      - name: Install musl tools
+        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.triple }} --bin hsm --bin agentmail
+
+      # One name per asset, so the install script can ask for exactly what it needs.
+      - name: Name the artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          ext=""
+          [ "${{ matrix.triple }}" = "x86_64-pc-windows-msvc" ] && ext=".exe"
+          for name in hsm agentmail; do
+            cp "target/${{ matrix.triple }}/release/$name$ext" "dist/$name-${{ matrix.triple }}$ext"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.triple }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+
+      - name: Collect the assets
+        shell: bash
+        run: |
+          mkdir -p dist
+          find staging -type f -exec cp {} dist/ \;
+          # The script accepts either separator, but coreutils text mode is what it
+          # expects to see most often.
+          (cd dist && sha256sum * > SHA256SUMS)
+          # What this release was built from, so an installer can tell a checkout that
+          # is ahead of the release.
+          git rev-parse HEAD > dist/COMMIT
+          ls -l dist
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

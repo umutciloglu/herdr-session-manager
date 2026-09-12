@@ -25,14 +25,18 @@ pub async fn send(
     }
 
     let out = svc.call_tool("agentmail_send", &args).await?;
-    let outcome = out["outcome"].as_str().unwrap_or("?");
     let target = out["to"].as_str().unwrap_or(to);
     let id = out["message_id"].as_str().unwrap_or("-");
+    // A one-shot peer answers inline, and that is the whole point of ask mode: say so
+    // rather than reporting the plumbing.
+    let outcome = match out["reply"].is_string() {
+        true => "replied",
+        false => out["outcome"].as_str().unwrap_or("?"),
+    };
     println!("{outcome} {id} -> {target}");
 
-    if let Some(reply) = out["reply"].as_str() {
-        println!("\n{reply}");
-        return Ok(());
+    if let Some(warning) = out["warning"].as_str() {
+        eprintln!("warning: {warning}");
     }
     if let Some(candidates) = out["candidates"].as_array() {
         println!("\nmore than one session matches:");
@@ -44,10 +48,17 @@ pub async fn send(
     if let Some(err) = out["error"].as_str() {
         anyhow::bail!("{err}");
     }
-    if outcome == "use_native" {
-        println!("{}", out["hint"].as_str().unwrap_or_default());
+    if let Some(hint) = out["hint"].as_str() {
+        println!("{hint}");
     }
 
+    if let Some(reply) = out["reply"].as_str() {
+        println!("\n{reply}");
+        return Ok(());
+    }
+
+    // Nothing came back inline. The peer may still answer as a row — that is what
+    // --wait is for.
     if let Some(secs) = wait {
         let answer = svc
             .call_tool(
@@ -63,12 +74,24 @@ pub async fn send(
     Ok(())
 }
 
-pub fn inbox(ctx: &Ctx, addr: Option<&str>) -> anyhow::Result<()> {
+pub fn inbox(ctx: &Ctx, addr: Option<&str>, as_json: bool) -> anyhow::Result<()> {
     let me = match addr {
         Some(raw) => raw.parse()?,
         None => ctx.me(),
     };
     let messages = ctx.store.inbox(&me, false, 50)?;
+
+    if as_json {
+        // Oldest first, so a poller can append what it has not seen yet. Every field is
+        // always present, null included: a consumer should not have to guess.
+        let rows: Vec<Value> = messages.iter().rev().map(message_json).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"address": me.to_string(), "messages": rows}))?
+        );
+        return Ok(());
+    }
+
     if messages.is_empty() {
         println!("{me}: no mail");
         return Ok(());
@@ -136,6 +159,21 @@ pub fn alias(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
         .set_alias(&id.harness, &id.session_id, Some(name))?;
     println!("{} is now `{name}`", ctx.me());
     Ok(())
+}
+
+fn message_json(msg: &Message) -> Value {
+    json!({
+        "id": msg.id,
+        "from": msg.from.to_string(),
+        "to": msg.to.to_string(),
+        "text": msg.text,
+        "reply_to": msg.reply_to,
+        "expects_reply": msg.expects_reply,
+        "status": msg.status.as_str(),
+        "created_at": msg.created_at.to_rfc3339(),
+        "delivered_at": msg.delivered_at.map(|t| t.to_rfc3339()),
+        "pushed_at": msg.pushed_at.map(|t| t.to_rfc3339()),
+    })
 }
 
 fn message_line(msg: &Message) -> String {

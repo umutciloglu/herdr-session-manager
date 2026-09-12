@@ -15,6 +15,14 @@ pub enum Harness {
 }
 
 impl Harness {
+    /// Not a CLI. `human:<name>` rows are reply sinks for a person: addressable
+    /// forever, never a running process.
+    pub const HUMAN: &'static str = "human";
+
+    pub fn is_human(&self) -> bool {
+        self.as_str() == Harness::HUMAN
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             Harness::Claude => "claude",
