@@ -7,6 +7,7 @@ Session browsing and agent-to-agent chat for people who run many AI coding agent
 herdr already restores your agent panes after a restart. This plugin adds the parts around that:
 
 - **Find any session again.** Every Claude Code and Codex session you ever ran, plus the sessions herdr knows for every other harness, in one searchable popup. Open one in the current pane, a split, or a new tab.
+- **Jump to what is running.** A session that runs in a herdr pane right now is marked `live`. Press Enter and the popup drops you into that pane instead of starting a second copy. Claude Code background jobs are marked `job`, and Enter jumps to the pane that is showing them. Working, idle, and blocked agents are told apart at a glance.
 - **Let agents talk to each other.** A Claude session can ask a Codex session a question and get the answer back, and the other way round. Works across harnesses, works when the other session is idle, and works when it is not running at all.
 - **Ask a session yourself.** Pick a session, type a question, get the reply in the popup.
 
@@ -55,7 +56,7 @@ Reload with `herdr server reload-config`.
 
 ## First five minutes
 
-**Sessions.** Press `prefix+s`. Type to filter. Enter jumps to the pane a live session runs in, or to the pane showing a background job, and opens the session in a split when there is no pane. `Esc` switches from typing to keys: `o` or `v` split right, `d` split down, `t` new tab, `c` this pane, `i` paste the session's address into your pane. `s`, `a`, `r` jump between the search, ask, and replies panels.
+**Sessions.** Press `prefix+s`. Type to filter. Rows marked `live` run in a herdr pane right now; rows marked `job` are Claude Code background jobs. Enter on either jumps to the pane where it runs or is shown. Enter on anything else opens the session in a split. `Esc` switches from typing to keys: `o` or `v` split right, `d` split down, `t` new tab, `c` this pane, `i` paste the session's address into your pane. `s`, `a`, `r` jump between the search, ask, and replies panels. The jump and split keys are rebindable under `[keys]` in `~/.config/hsm/config.toml`.
 
 **Chat, one-time setup.** Run `agentmail setup` in a terminal, or press `prefix+shift+s`. It is a checklist: arrows move, space toggles, `a` selects everything, Enter applies. It registers the MCP server and installs Stop and SessionStart hooks in Claude Code and Codex. Codex asks once whether to trust the new hooks.
 
