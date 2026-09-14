@@ -78,9 +78,26 @@ fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// Windows named pipe leaf, used where there is no socket file to place.
-pub fn poke_name(harness: &Harness, session_id: &str) -> String {
-    format!("agentmail-{}-{}", harness, sanitize(session_id))
+impl Paths {
+    /// Windows named pipe leaf, used where there is no socket file to place. Pipe names
+    /// are machine-wide, unlike a socket under the root, so the root is folded in: a
+    /// second state dir (a test run beside the real mailbox) must never share a pipe.
+    pub fn poke_pipe(&self, harness: &Harness, session_id: &str) -> String {
+        format!(
+            "agentmail-{:016x}-{}-{}",
+            fnv1a(self.root.to_string_lossy().as_bytes()),
+            harness,
+            sanitize(session_id)
+        )
+    }
+}
+
+/// Stable across builds, unlike `DefaultHasher`, so every agentmail binary names the
+/// same root's pipes the same way.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// Session ids are harness-controlled; keep them usable as a filename component.
@@ -107,7 +124,24 @@ mod tests {
         assert_eq!(p.config(), PathBuf::from("/tmp/am/config.toml"));
         assert_eq!(
             p.poke_socket(&Harness::Claude, "88/90:a6"),
-            PathBuf::from("/tmp/am/poke/claude-88_90_a6.sock")
+            Path::new("/tmp/am")
+                .join("poke")
+                .join("claude-88_90_a6.sock")
+        );
+    }
+
+    #[test]
+    fn a_pipe_name_belongs_to_one_root() {
+        let a = Paths::new("/tmp/am").poke_pipe(&Harness::Claude, "88/90:a6");
+        let b = Paths::new("/tmp/other").poke_pipe(&Harness::Claude, "88/90:a6");
+        assert_ne!(a, b);
+        assert!(
+            a.starts_with("agentmail-") && a.ends_with("-claude-88_90_a6"),
+            "{a}"
+        );
+        assert_eq!(
+            a,
+            Paths::new("/tmp/am").poke_pipe(&Harness::Claude, "88/90:a6")
         );
     }
 }

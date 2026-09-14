@@ -24,19 +24,24 @@ fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-/// herdr keeps its config under `~/.config/herdr` on every unix, macOS included,
-/// so `dirs::config_dir` (which points at `Library/Application Support` there) is wrong.
+/// Mirrors herdr's own `config::config_dir`. herdr honours `XDG_CONFIG_HOME` on every
+/// platform, Windows included. Without it herdr uses `~/.config/herdr` on every unix,
+/// macOS included, so `dirs::config_dir` (`Library/Application Support` there) is wrong.
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(xdg) = env_var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("herdr"));
+    }
     #[cfg(unix)]
     {
-        if let Some(xdg) = env_var("XDG_CONFIG_HOME") {
-            return Some(PathBuf::from(xdg).join("herdr"));
-        }
         dirs::home_dir().map(|home| home.join(".config").join("herdr"))
     }
     #[cfg(not(unix))]
     {
-        dirs::config_dir().map(|dir| dir.join("herdr"))
+        // herdr reads `APPDATA` itself; the known-folder lookup only covers a stripped env.
+        env_var("APPDATA")
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+            .map(|dir| dir.join("herdr"))
     }
 }
 
@@ -50,7 +55,8 @@ pub(crate) fn resolve_socket_path(
         return Ok(PathBuf::from(explicit));
     }
     let dir = config_dir.ok_or(Error::SocketPathUnknown)?;
-    Ok(match session_env {
+    // herdr treats a session named "default" as the unnamed one.
+    Ok(match session_env.filter(|name| *name != "default") {
         Some(name) => dir.join("sessions").join(name).join(SOCKET_FILE),
         None => dir.join(SOCKET_FILE),
     })
@@ -78,16 +84,31 @@ async fn open(path: &Path) -> std::io::Result<Socket> {
     tokio::net::UnixStream::connect(path).await
 }
 
+/// herdr binds its Windows pipe as an `interprocess` namespaced name, which lives under
+/// `\\.\pipe\`. The socket path it exports is only the name inside that namespace; the
+/// file at that path is a marker, not something a client can talk to.
+#[cfg(any(windows, test))]
+fn pipe_name(path: &str) -> String {
+    const PREFIX: &str = r"\\.\pipe\";
+    if path.starts_with(PREFIX) || path.starts_with(r"\\?\pipe\") {
+        path.to_string()
+    } else {
+        format!("{PREFIX}{path}")
+    }
+}
+
 #[cfg(windows)]
 async fn open(path: &Path) -> std::io::Result<Socket> {
     use tokio::net::windows::named_pipe::ClientOptions;
+
+    let pipe = pipe_name(&path.to_string_lossy());
 
     // A named pipe rejects connects while the server is between accepts; that is
     // normal and short-lived, so retry rather than surfacing it.
     const ERROR_PIPE_BUSY: i32 = 231;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match ClientOptions::new().open(path) {
+        match ClientOptions::new().open(&pipe) {
             Ok(client) => return Ok(client),
             Err(e)
                 if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
@@ -177,15 +198,37 @@ mod tests {
     fn named_session_gets_its_own_socket() {
         let path = resolve_socket_path(None, Some("work"), Some(Path::new("/cfg")));
         assert_eq!(
-            path.expect("path").to_str(),
-            Some("/cfg/sessions/work/herdr.sock")
+            path.expect("path"),
+            Path::new("/cfg")
+                .join("sessions")
+                .join("work")
+                .join("herdr.sock")
         );
     }
 
     #[test]
     fn default_session_socket() {
         let path = resolve_socket_path(None, None, Some(Path::new("/cfg")));
-        assert_eq!(path.expect("path").to_str(), Some("/cfg/herdr.sock"));
+        assert_eq!(path.expect("path"), Path::new("/cfg").join("herdr.sock"));
+    }
+
+    #[test]
+    fn session_named_default_is_the_default_socket() {
+        let path = resolve_socket_path(None, Some("default"), Some(Path::new("/cfg")));
+        assert_eq!(path.expect("path"), Path::new("/cfg").join("herdr.sock"));
+    }
+
+    #[test]
+    fn pipe_name_puts_the_socket_path_in_the_pipe_namespace() {
+        assert_eq!(
+            pipe_name(r"C:\Users\me\AppData\Roaming\herdr\herdr.sock"),
+            r"\\.\pipe\C:\Users\me\AppData\Roaming\herdr\herdr.sock"
+        );
+    }
+
+    #[test]
+    fn pipe_name_keeps_a_full_pipe_name() {
+        assert_eq!(pipe_name(r"\\.\pipe\herdr"), r"\\.\pipe\herdr");
     }
 
     #[test]

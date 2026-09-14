@@ -19,6 +19,10 @@ toml.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The same probe on Windows: OpenProcess + GetExitCodeProcess.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true }

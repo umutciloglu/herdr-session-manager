@@ -89,6 +89,7 @@ impl Setup {
 
     /// The exact command a harness runs. Quoted so a path with spaces survives the
     /// shell the harness runs it through.
+    #[cfg(not(windows))]
     fn hook_command(&self, event: &str) -> String {
         let exe = if self.exe.contains(char::is_whitespace) {
             format!("'{}'", self.exe)
@@ -96,6 +97,21 @@ impl Setup {
             self.exe.clone()
         };
         format!("{exe} hook {event}")
+    }
+
+    /// Codex runs a hook line through PowerShell on Windows, or cmd.exe when it finds no
+    /// PowerShell, and the two quote differently. A short (8.3) directory name usually
+    /// removes the spaces, so one unquoted line serves both.
+    #[cfg(windows)]
+    fn hook_command(&self, event: &str) -> String {
+        windows_hook_line(&short_dir_path(&self.exe), event)
+    }
+
+    /// Claude on Windows runs a hook line through Git Bash, which eats the backslashes
+    /// of `C:\...`, or PowerShell. Its exec form skips the shell, and `agentmail.exe` is
+    /// the real executable that form requires.
+    fn exec_form(kind: Kind) -> bool {
+        cfg!(windows) && matches!(kind, Kind::ClaudeStop | Kind::ClaudeSessionStart)
     }
 
     /// What this binary is called, whatever directory it was run from. Entries are
@@ -195,12 +211,18 @@ impl Setup {
         };
         let path = self.file(kind);
         let content = read(&path);
-        let command = self.hook_command(args[1]);
+        let exec = Self::exec_form(kind);
+        let command = if exec {
+            self.exe.clone()
+        } else {
+            self.hook_command(args[1])
+        };
         let edit = edits::set_hook(
             &content,
             &edits::HookSpec {
                 event,
                 command: &command,
+                exec,
                 basename: &self.basename(),
                 args: &args,
                 matcher,
@@ -300,10 +322,7 @@ impl tui::Installer for Setup {
     }
 
     fn hint(&self) -> Vec<String> {
-        vec![
-            format!("claude {CHANNEL_FLAG}"),
-            format!("alias claude-mail='claude {CHANNEL_FLAG}'"),
-        ]
+        vec![format!("claude {CHANNEL_FLAG}"), profile_shortcut()]
     }
 }
 
@@ -402,7 +421,17 @@ fn print_channel_hint() {
     println!("\nClaude only opens a channel when it is launched with:\n");
     println!("  claude {CHANNEL_FLAG}\n");
     println!("Add this to your shell profile yourself if you want it by default:\n");
-    println!("  alias claude-mail='claude {CHANNEL_FLAG}'\n");
+    println!("  {}\n", profile_shortcut());
+}
+
+/// The launch shortcut for the user's own profile. Windows means PowerShell, where an
+/// alias cannot carry arguments, so it gets a function instead.
+fn profile_shortcut() -> String {
+    if cfg!(windows) {
+        format!("function claude-mail {{ claude {CHANNEL_FLAG} @args }}")
+    } else {
+        format!("alias claude-mail='claude {CHANNEL_FLAG}'")
+    }
 }
 
 fn read(path: &Path) -> String {
@@ -430,5 +459,85 @@ fn run_cli(program: &str, args: &[&str]) -> bool {
     match Command::new(program).args(args).status() {
         Ok(status) => status.success(),
         Err(_) => false,
+    }
+}
+
+/// A line PowerShell and cmd.exe both read as "this program, these words". A path made
+/// of plain characters needs no quoting in either. Anything else gets PowerShell's call
+/// operator, because PowerShell is the shell Codex picks whenever one exists.
+#[cfg(any(windows, test))]
+fn windows_hook_line(exe: &str, event: &str) -> String {
+    let plain = !exe.is_empty()
+        && exe
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '\\' | ':' | '.' | '-' | '_' | '~'));
+    if plain {
+        format!("{exe} hook {event}")
+    } else {
+        format!("& '{}' hook {event}", exe.replace('\'', "''"))
+    }
+}
+
+/// The exe with its directory in 8.3 form, which drops spaces where the volume keeps
+/// short names. The file name stays long so the entry still reads `agentmail.exe`.
+/// Any failure hands the path back unchanged.
+#[cfg(windows)]
+fn short_dir_path(exe: &str) -> String {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let path = Path::new(exe);
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return exe.to_string();
+    };
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is nul-terminated; a zero-length buffer only asks for the size.
+    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return exe.to_string();
+    }
+    let mut buf = vec![0u16; needed as usize];
+    // SAFETY: `buf` holds `needed` units, the size the first call asked for.
+    let written = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), needed) };
+    if written == 0 || written >= needed {
+        return exe.to_string();
+    }
+    buf.truncate(written as usize);
+    Path::new(&OsString::from_wide(&buf))
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_windows_path_runs_unquoted_in_both_shells() {
+        assert_eq!(
+            windows_hook_line(r"C:\Users\FIRSTL~1\herdr\agentmail.exe", "codex-stop"),
+            r"C:\Users\FIRSTL~1\herdr\agentmail.exe hook codex-stop"
+        );
+    }
+
+    #[test]
+    fn a_path_with_spaces_uses_the_powershell_call_operator() {
+        assert_eq!(
+            windows_hook_line(r"C:\Users\First Last\agentmail.exe", "codex-stop"),
+            r"& 'C:\Users\First Last\agentmail.exe' hook codex-stop"
+        );
+        assert_eq!(
+            windows_hook_line(r"C:\Users\O'Neil\agentmail.exe", "codex-stop"),
+            r"& 'C:\Users\O''Neil\agentmail.exe' hook codex-stop"
+        );
+    }
+
+    #[test]
+    fn claude_uses_exec_form_only_on_windows() {
+        assert_eq!(Setup::exec_form(Kind::ClaudeStop), cfg!(windows));
+        assert_eq!(Setup::exec_form(Kind::ClaudeSessionStart), cfg!(windows));
+        assert!(!Setup::exec_form(Kind::CodexStop));
     }
 }

@@ -289,12 +289,13 @@ pub fn parent_harness(pid: u32) -> Option<Harness> {
 /// `claude`, `claude-code`, `codex`, `codex.exe` — the harness binaries as they appear
 /// in a process table. Anything else (a shell, a terminal, launchd) keeps the walk going.
 pub fn harness_of_process_name(name: &str) -> Option<Harness> {
+    // Lowercase first: Windows process tables can report `CLAUDE.EXE`.
     let name = name
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(name)
-        .trim_end_matches(".exe")
         .to_ascii_lowercase();
+    let name = name.trim_end_matches(".exe");
     if name == "codex" || name.starts_with("codex-") {
         return Some(Harness::Codex);
     }
@@ -472,6 +473,10 @@ mod tests {
     fn harness_binaries_are_recognised_in_a_process_table() {
         assert_eq!(harness_of_process_name("codex"), Some(Harness::Codex));
         assert_eq!(harness_of_process_name("Codex.exe"), Some(Harness::Codex));
+        assert_eq!(
+            harness_of_process_name(r"C:\Users\x\.local\bin\CLAUDE.EXE"),
+            Some(Harness::Claude)
+        );
         assert_eq!(harness_of_process_name("claude"), Some(Harness::Claude));
         assert_eq!(
             harness_of_process_name("claude-code"),

@@ -5,22 +5,30 @@
 # user decision, so it lives behind the explicit `setup-chat` action instead of the
 # build step. Build commands run without a terminal, so they cannot ask.
 #
-# Windows is not listed yet: nothing has been built or run there. The PowerShell
-# launchers under scripts/ are kept for when it is.
+# Windows (herdr calls plugins there "preview"):
+#  - [[build]] and [[actions]] have a /bin/sh and a PowerShell variant, gated by the
+#    item-level `platforms` key.
+#  - herdr rejects a duplicate action id whatever its platforms, so the Windows actions
+#    carry a `-windows` suffix. Windows keybindings name those ids.
+#  - [[startup]] and [[panes]] are shared: herdr 0.9.0 resolves `./target/release/hsm`
+#    against the plugin root and finds `hsm.exe` there.
 
 id = "herdr-session-manager"
 name = "Session Manager"
-version = "0.1.1"
+version = "0.1.2"
 description = "Browse, search, restore and open agent sessions; optional cross-harness agent chat."
 min_herdr_version = "0.9.0"
-platforms = ["linux", "macos"]
+platforms = ["linux", "macos", "windows"]
 
 [[build]]
 platforms = ["linux", "macos"]
 command = ["/bin/sh", "scripts/fetch-or-build.sh"]
 
+[[build]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/fetch-or-build.ps1"]
+
 [[startup]]
-platforms = ["linux", "macos"]
 command = ["./target/release/hsm", "startup"]
 
 [[panes]]
@@ -68,3 +76,23 @@ title = "Set up agent chat"
 description = "Install or remove the agentmail MCP server and hooks in Claude Code and Codex."
 command = ["/bin/sh", "scripts/setup-chat.sh"]
 
+[[actions]]
+id = "browse-windows"
+platforms = ["windows"]
+title = "Browse agent sessions"
+description = "Search past and live agent sessions; open one in this pane, a split, or a tab."
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/browse.ps1"]
+
+[[actions]]
+id = "ask-windows"
+platforms = ["windows"]
+title = "Ask an agent session"
+description = "Pick a past or live agent session and send it a question; the answer comes back to you."
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/ask.ps1"]
+
+[[actions]]
+id = "setup-chat-windows"
+platforms = ["windows"]
+title = "Set up agent chat"
+description = "Install or remove the agentmail MCP server and hooks in Claude Code and Codex."
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/setup-chat.ps1"]

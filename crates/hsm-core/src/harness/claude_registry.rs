@@ -110,9 +110,35 @@ fn pid_alive(pid: u32) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Windows is not shipped, and keeping a stale row is milder than dropping
-/// every running one.
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: plain Win32 calls; the handle is closed on every path that opened one.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Denied means the process is there but belongs to someone else, which
+            // still counts as alive, like EPERM on unix.
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        // An exited process stays openable while anyone holds a handle to it, so the
+        // open alone does not prove it is running.
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
+    }
+}
+
+/// Neither unix nor Windows: keeping a stale row is milder than dropping every
+/// running one.
+#[cfg(not(any(unix, windows)))]
 fn pid_alive(_pid: u32) -> bool {
     true
 }
@@ -164,8 +190,9 @@ mod tests {
     }
 
     /// A pid that does not fit an `i32` would wrap negative, and `kill(-1, 0)`
-    /// answers for every process the caller may signal — a yes for junk.
-    #[cfg(unix)]
+    /// answers for every process the caller may signal — a yes for junk. Windows
+    /// rejects the same pids as invalid, and 0 is its idle process, never openable.
+    #[cfg(any(unix, windows))]
     #[test]
     fn a_pid_no_process_could_have_is_dead() {
         assert!(!pid_alive(u32::MAX), "-1 as i32");

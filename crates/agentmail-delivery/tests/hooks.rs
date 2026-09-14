@@ -23,10 +23,12 @@ fn codex_stop() -> String {
 }
 
 fn hook_with_transcript(path: &std::path::Path) -> String {
+    // Encoded, not pasted: a Windows temp path is full of backslashes, which are JSON
+    // escapes.
+    let path = serde_json::to_string(&path.to_string_lossy()).expect("json string");
     format!(
         r#"{{"session_id":"{CLAUDE_ID}","cwd":"/Users/x/proj","hook_event_name":"Stop",
-            "transcript_path":"{}","stop_hook_active":false}}"#,
-        path.display()
+            "transcript_path":{path},"stop_hook_active":false}}"#
     )
 }
 

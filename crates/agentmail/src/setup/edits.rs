@@ -81,23 +81,45 @@ pub fn split_command(command: &str) -> Vec<String> {
 /// again from `~/.local/bin` installed two entries that both fired, and the model got
 /// every message twice.
 pub fn command_matches(command: &str, basename: &str, args: &[&str]) -> bool {
-    let words = split_command(command);
+    let mut words = split_command(command);
+    // PowerShell's call operator, which a Windows line needs in front of a quoted path.
+    if words.first().is_some_and(|w| w == "&") {
+        words.remove(0);
+    }
     let Some(program) = words.first() else {
         return false;
     };
-    let stem = program
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(program)
-        .trim_end_matches(".exe");
-    stem == basename && words[1..] == *args
+    program_is(program, basename) && words[1..] == *args
+}
+
+fn program_is(program: &str, basename: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = match name.len().checked_sub(4) {
+        Some(cut) if name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(".exe") => {
+            &name[..cut]
+        }
+        _ => name,
+    };
+    // Windows file names ignore case, and PATHEXT hands out `agentmail.EXE`.
+    stem.eq_ignore_ascii_case(basename)
 }
 
 fn entry_matches(entry: &Value, basename: &str, args: &[&str]) -> bool {
-    entry
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|c| command_matches(c, basename, args))
+    let Some(command) = entry.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    match entry.get("args").and_then(Value::as_array) {
+        // Exec form: `command` is the program itself, spaces and all, never a line.
+        Some(exec_args) => {
+            program_is(command, basename)
+                && exec_args.len() == args.len()
+                && exec_args
+                    .iter()
+                    .zip(args)
+                    .all(|(have, want)| have.as_str() == Some(*want))
+        }
+        None => command_matches(command, basename, args),
+    }
 }
 
 pub fn hook_installed(content: &str, event: &str, basename: &str, args: &[&str]) -> bool {
@@ -120,8 +142,12 @@ pub fn hook_installed(content: &str, event: &str, basename: &str, args: &[&str])
 /// Groups we did not write — herdr's above all — are never read into or reordered.
 pub struct HookSpec<'a> {
     pub event: &'a str,
-    /// The command line to write.
+    /// The command line to write, or the bare program when `exec` is set.
     pub command: &'a str,
+    /// Claude's exec form: `command` is spawned directly with `args` and no shell. On
+    /// Windows that shell would be Git Bash or PowerShell, and neither runs a plain
+    /// `C:\...\agentmail.exe` line reliably.
+    pub exec: bool,
     /// How our own entries are recognised, whatever directory they point at.
     pub basename: &'a str,
     pub args: &'a [&'a str],
@@ -136,6 +162,7 @@ pub fn set_hook(content: &str, spec: &HookSpec<'_>) -> Result<HookEdit> {
     let HookSpec {
         event,
         command,
+        exec,
         basename,
         args,
         matcher,
@@ -167,6 +194,14 @@ pub fn set_hook(content: &str, spec: &HookSpec<'_>) -> Result<HookEdit> {
                 seen = true;
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("command".into(), json!(command));
+                    // Switching forms in place: a leftover `args` would turn a line
+                    // into a program name.
+                    if exec {
+                        obj.insert("args".into(), json!(args));
+                    } else {
+                        // `remove` would swap the last key into its slot.
+                        obj.shift_remove("args");
+                    }
                 }
                 true
             });
@@ -189,10 +224,11 @@ pub fn set_hook(content: &str, spec: &HookSpec<'_>) -> Result<HookEdit> {
         if let Some(matcher) = matcher {
             group.insert("matcher".into(), json!(matcher));
         }
-        group.insert(
-            "hooks".into(),
-            json!([{ "type": "command", "command": command, "timeout": HOOK_TIMEOUT }]),
-        );
+        let mut entry = json!({ "type": "command", "command": command, "timeout": HOOK_TIMEOUT });
+        if exec {
+            entry["args"] = json!(args);
+        }
+        group.insert("hooks".into(), json!([entry]));
 
         let hooks = map
             .entry("hooks")
@@ -268,13 +304,7 @@ pub fn mcp_json_installed(content: &str, name: &str, basename: &str) -> bool {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let same_binary = command
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(command)
-        .trim_end_matches(".exe")
-        == basename;
-    same_binary && args == ["mcp"]
+    program_is(command, basename) && args == ["mcp"]
 }
 
 pub fn add_mcp_json(
@@ -331,13 +361,7 @@ pub fn mcp_toml_installed(content: &str, name: &str, basename: &str) -> bool {
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    let same_binary = command
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(command)
-        .trim_end_matches(".exe")
-        == basename;
-    same_binary && args == ["mcp"]
+    program_is(command, basename) && args == ["mcp"]
 }
 
 /// The table exists, whoever it points at.
@@ -477,6 +501,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event,
                 command: &format!("{exe} {} {}", args[0], args[1]),
+                exec: false,
                 basename: "agentmail",
                 args,
                 matcher: None,
@@ -513,6 +538,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event: "SessionStart",
                 command: &format!("{EXE} hook claude-session-start"),
+                exec: false,
                 basename: "agentmail",
                 args: &SESSION,
                 matcher: Some("*"),
@@ -541,6 +567,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event: "SessionStart",
                 command: &format!("{EXE} hook claude-session-start"),
+                exec: false,
                 basename: "agentmail",
                 args: &SESSION,
                 matcher: Some("*"),
@@ -614,6 +641,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event: "Stop",
                 command: &format!("{EXE} hook claude-stop"),
+                exec: false,
                 basename: "agentmail",
                 args: &STOP,
                 matcher: None,
@@ -641,6 +669,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event: "Stop",
                 command: &format!("{EXE} hook claude-stop"),
+                exec: false,
                 basename: "agentmail",
                 args: &STOP,
                 matcher: None,
@@ -661,6 +690,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event: "Stop",
                 command: &format!("{EXE} hook codex-stop"),
+                exec: false,
                 basename: "agentmail",
                 args: &args,
                 matcher: None,
@@ -696,6 +726,7 @@ followUpQueueMode = "queue"
             &HookSpec {
                 event: "Stop",
                 command: "x",
+                exec: false,
                 basename: "agentmail",
                 args: &STOP,
                 matcher: None,
@@ -735,6 +766,86 @@ followUpQueueMode = "queue"
             "agentmail",
             &STOP
         ));
+    }
+
+    #[test]
+    fn a_windows_line_is_ours_in_either_spelling() {
+        assert!(command_matches(
+            r"& 'C:\Users\First Last\agentmail.exe' hook claude-stop",
+            "agentmail",
+            &STOP
+        ));
+        assert!(command_matches(
+            r"C:\Users\FIRSTL~1\AGENTMAIL.EXE hook claude-stop",
+            "agentmail",
+            &STOP
+        ));
+        assert!(!command_matches("& hook claude-stop", "agentmail", &STOP));
+    }
+
+    const WIN_EXE: &str = r"C:\Users\First Last\AppData\Roaming\herdr\agentmail.exe";
+
+    fn exec_spec<'a>(command: &'a str, add_if_missing: bool) -> HookSpec<'a> {
+        HookSpec {
+            event: "Stop",
+            command,
+            exec: true,
+            basename: "agentmail",
+            args: &STOP,
+            matcher: None,
+            add_if_missing,
+            path: "settings",
+        }
+    }
+
+    #[test]
+    fn exec_form_keeps_the_program_whole_and_the_arguments_apart() {
+        let out = set_hook(CLAUDE_SETTINGS, &exec_spec(WIN_EXE, true)).expect("set hook");
+        assert!(hook_installed(&out.content, "Stop", "agentmail", &STOP));
+
+        let entry = &json(&out.content)["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(entry["command"], WIN_EXE);
+        assert_eq!(entry["args"], json!(["hook", "claude-stop"]));
+
+        let again = set_hook(&out.content, &exec_spec(WIN_EXE, true)).expect("set hook");
+        assert_eq!(again.content, out.content);
+    }
+
+    /// A Windows machine set up before exec form has a shell line that never ran; setup
+    /// must turn that entry into exec form, not add a second one.
+    #[test]
+    fn a_shell_line_becomes_exec_form_in_place() {
+        let line = install(CLAUDE_SETTINGS, r"C:\tools\agentmail.exe", "Stop", &STOP);
+        let out = set_hook(&line.content, &exec_spec(WIN_EXE, false)).expect("set hook");
+
+        let groups = json(&out.content)["hooks"]["Stop"]
+            .as_array()
+            .expect("groups")
+            .clone();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], WIN_EXE);
+        assert_eq!(
+            groups[0]["hooks"][0]["args"],
+            json!(["hook", "claude-stop"])
+        );
+    }
+
+    #[test]
+    fn exec_form_goes_back_to_a_line_without_leftover_args() {
+        let exec = set_hook(CLAUDE_SETTINGS, &exec_spec(WIN_EXE, true)).expect("set hook");
+        let line = install(&exec.content, EXE, "Stop", &STOP);
+
+        let entry = &json(&line.content)["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!(entry["command"], format!("{EXE} hook claude-stop"));
+        assert!(entry.get("args").is_none());
+    }
+
+    #[test]
+    fn an_exec_entry_with_other_arguments_is_not_ours() {
+        let entry = json!({"type": "command", "command": WIN_EXE, "args": ["hook", "codex-stop"]});
+        assert!(!entry_matches(&entry, "agentmail", &STOP));
+        let entry = json!({"type": "command", "command": WIN_EXE, "args": ["hook"]});
+        assert!(!entry_matches(&entry, "agentmail", &STOP));
     }
 
     #[test]

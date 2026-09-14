@@ -391,7 +391,6 @@ async fn a_resolve_error_never_loses_the_message() {
     assert_eq!(store.pending_for(&peer()).expect("pending").len(), 1);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn a_poke_wakes_a_waiter_before_the_poll_would() {
     use agentmail_core::poke::{PokeListener, Poker};

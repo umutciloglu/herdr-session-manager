@@ -94,5 +94,43 @@ fn username() -> String {
 
 /// Where the installed binary lives, for the config snippets `setup` writes.
 pub fn exe_path() -> PathBuf {
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agentmail"))
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agentmail"));
+    #[cfg(windows)]
+    let exe = without_verbatim_prefix(exe);
+    exe
+}
+
+/// herdr starts plugin binaries through a canonicalized `\\?\C:\...` path, and the
+/// prefix then shows up in `current_exe`. Harness shells take the plain form better,
+/// and only a path longer than MAX_PATH needs the prefix to work at all.
+#[cfg(any(windows, test))]
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    const MAX_PATH: usize = 260;
+    let plain = path
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|rest| rest.len() < MAX_PATH && rest.as_bytes().get(1) == Some(&b':'))
+        .map(PathBuf::from);
+    plain.unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_verbatim_drive_path_loses_its_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\herdr\agentmail.exe")),
+            PathBuf::from(r"C:\herdr\agentmail.exe")
+        );
+    }
+
+    #[test]
+    fn a_verbatim_unc_or_overlong_path_keeps_it() {
+        let unc = PathBuf::from(r"\\?\UNC\server\share\agentmail.exe");
+        assert_eq!(without_verbatim_prefix(unc.clone()), unc);
+        let long = PathBuf::from(format!(r"\\?\C:\{}\agentmail.exe", "d".repeat(300)));
+        assert_eq!(without_verbatim_prefix(long.clone()), long);
+    }
 }

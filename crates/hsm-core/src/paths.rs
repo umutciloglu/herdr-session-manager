@@ -26,12 +26,38 @@ pub fn home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// `~/.config/herdr/session.json` — herdr's persisted pane -> session refs.
+/// herdr's persisted pane -> session refs. herdr keeps `session.json` in its config
+/// dir, or in `sessions/<name>` under it for a named session.
 pub fn herdr_session_file() -> Option<PathBuf> {
     if let Some(p) = env_dir("HERDR_SESSION_FILE") {
         return Some(p);
     }
-    dirs::home_dir().map(|h| h.join(".config/herdr/session.json"))
+    let dir = herdr_config_dir()?;
+    // herdr treats a session named "default" as the unnamed one.
+    let dir = match std::env::var("HERDR_SESSION") {
+        Ok(name) if !name.is_empty() && name != "default" => dir.join("sessions").join(name),
+        _ => dir,
+    };
+    Some(dir.join("session.json"))
+}
+
+/// Mirrors herdr's `config::config_dir`, as `herdr_client::config_dir` does; hsm-core
+/// stays free of the client crate for one path rule. `XDG_CONFIG_HOME` wins on every
+/// platform, Windows included.
+fn herdr_config_dir() -> Option<PathBuf> {
+    if let Some(xdg) = env_dir("XDG_CONFIG_HOME") {
+        return Some(xdg.join("herdr"));
+    }
+    #[cfg(windows)]
+    {
+        env_dir("APPDATA")
+            .or_else(dirs::config_dir)
+            .map(|dir| dir.join("herdr"))
+    }
+    #[cfg(not(windows))]
+    {
+        dirs::home_dir().map(|h| h.join(".config").join("herdr"))
+    }
 }
 
 fn env_dir(key: &str) -> Option<PathBuf> {

@@ -232,7 +232,6 @@ async fn send_to_a_live_claude_peer_defers_to_native_messaging() {
 /// The CLI, the hooks and every other non-MCP caller have no native messaging to fall
 /// back to, so they must deliver — `use_native` is only an answer an interactive Claude
 /// session can act on.
-#[cfg(unix)]
 #[tokio::test]
 async fn the_cli_path_delivers_to_a_live_claude_peer() {
     use agentmail_core::PokeListener;

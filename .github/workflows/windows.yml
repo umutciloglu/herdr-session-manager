@@ -1,0 +1,212 @@
+# Proves the Windows port without tagging a release.
+#
+#   test     builds, tests and lints the workspace on Windows, and parses the .ps1 scripts
+#            with Windows PowerShell, which is what herdr starts them with.
+#   install  does what a user does: installs herdr with its own installer, installs the
+#            plugin from this exact commit with `herdr plugin install --ref`, then runs
+#            the plugin against a headless herdr server over the real named pipe.
+#
+# A branch declares a version with no release behind it, so the install builds from
+# source, which is the code under test. Run it by hand from the Actions tab too.
+name: windows
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+      # Windows-only cfg branches are compiled nowhere else, so warnings there would
+      # otherwise go unseen.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Parse the PowerShell scripts
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem scripts -Filter *.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Host "$($file.Name): $_" }; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Kept away from the runner's real profile state, and the same for every step.
+      AGENTMAIL_STATE_DIR: ${{ runner.temp }}\agentmail-state
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install herdr
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The installer edits the user PATH, which this session does not see.
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ }
+          foreach ($dir in $userPath) {
+            $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+            $env:Path = "$dir;$env:Path"
+          }
+          herdr --version
+
+      - name: herdr plugin install --ref ${{ github.sha }}
+        shell: pwsh
+        run: |
+          herdr plugin install ${{ github.repository }} --ref ${{ github.sha }} --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          herdr plugin list
+
+      - name: Check the installed binaries and launchers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Get-ChildItem (Join-Path $env:APPDATA 'herdr\plugins\github') -Directory -Filter 'herdr-session-manager-*' | Select-Object -First 1
+          if (-not $root) { throw 'no plugin checkout under %APPDATA%\herdr\plugins\github' }
+          $release = Join-Path $root.FullName 'target\release'
+          & (Join-Path $release 'hsm.exe') --version
+          & (Join-Path $release 'agentmail.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'agentmail.exe did not run' }
+
+          # The launchers must find the moved checkout on their own.
+          $bin = Join-Path $env:USERPROFILE '.local\bin'
+          $out = & (Join-Path $bin 'hsm.cmd') --version
+          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch 'hsm') { throw "hsm.cmd launcher failed: $out" }
+          $out = & (Join-Path $bin 'agentmail.cmd') --version
+          if ($LASTEXITCODE -ne 0 -or "$out" -notmatch 'agentmail') { throw "agentmail.cmd launcher failed: $out" }
+          "release=$release" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Run the hook lines setup writes, through the shells that run them
+        shell: pwsh
+        run: |
+          # Every failure below throws on its own; 'Stop' would also turn the stderr that
+          # `2>&1` captures from a native command into an error.
+          $ErrorActionPreference = 'Continue'
+
+          # Runs setup for one exe and returns what it wrote into Claude and Codex.
+          function Install-Hooks($exe, $name) {
+            $fakeHome = Join-Path $env:RUNNER_TEMP "home-$name"
+            & $exe setup --yes --home $fakeHome | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "setup --yes failed for $exe" }
+            & $exe setup --check --home $fakeHome | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "setup --check does not see what setup --yes wrote for $exe" }
+            $claude = Get-Content (Join-Path $fakeHome '.claude\settings.json') -Raw | ConvertFrom-Json
+            $codex = Get-Content (Join-Path $fakeHome '.codex\hooks.json') -Raw | ConvertFrom-Json
+            [pscustomobject]@{
+              Claude = $claude.hooks.SessionStart[0].hooks[0]
+              Codex  = $codex.hooks.SessionStart[0].hooks[0].command
+            }
+          }
+
+          function Assert-Registered($output, $what) {
+            $text = ($output | Out-String)
+            Write-Host "${what}: $text"
+            if ($text -notmatch 'agentmail: registered') { throw "$what did not run agentmail" }
+          }
+
+          function Test-Hooks($hooks, $label, $id) {
+            $claudePayload = "{`"session_id`":`"$id-claude`",`"hook_event_name`":`"SessionStart`"}"
+            $codexPayload = "{`"session_id`":`"$id-codex`",`"hook_event_name`":`"SessionStart`"}"
+
+            # Claude's exec form: no shell at all.
+            if (-not $hooks.Claude.args) { throw "$label Claude hook is not in exec form: $($hooks.Claude | ConvertTo-Json -Compress)" }
+            Assert-Registered ($claudePayload | & $hooks.Claude.command @($hooks.Claude.args) 2>&1) "$label Claude exec form"
+
+            # Codex: PowerShell whenever it exists, cmd.exe otherwise.
+            $line = $hooks.Codex
+            Assert-Registered ($codexPayload | powershell -NoProfile -Command $line 2>&1) "$label Codex line via PowerShell"
+            if ($line -notmatch '^&') {
+              Assert-Registered ($codexPayload | cmd /d /c $line 2>&1) "$label Codex line via cmd"
+            } else {
+              Write-Host "$label Codex line needs PowerShell (no 8.3 names on this volume): $line"
+            }
+          }
+
+          $installed = Join-Path $env:release 'agentmail.exe'
+          Test-Hooks (Install-Hooks $installed 'plain') 'installed path' 'ci-plain'
+
+          # A user name with a space puts one in every path under the profile.
+          $spaced = Join-Path $env:RUNNER_TEMP 'agent mail'
+          New-Item -ItemType Directory -Force $spaced | Out-Null
+          Copy-Item (Join-Path $env:release '*.exe') $spaced
+          Test-Hooks (Install-Hooks (Join-Path $spaced 'agentmail.exe') 'spaced') 'spaced path' 'ci-spaced'
+
+      - name: Run the plugin against a headless herdr server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Invoke-Herdr {
+            $out = & herdr @args 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "herdr $args failed ($LASTEXITCODE): $out" }
+            $out
+          }
+
+          Start-Process -FilePath (Get-Command herdr).Source -ArgumentList 'server' -NoNewWindow `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\herdr-server.out" -RedirectStandardError "$env:RUNNER_TEMP\herdr-server.err"
+
+          $workspace = $null
+          for ($i = 0; $i -lt 60 -and -not $workspace; $i++) {
+            Start-Sleep -Seconds 1
+            $json = & herdr workspace create --cwd $env:GITHUB_WORKSPACE --label ci --focus 2>$null
+            if ($LASTEXITCODE -eq 0) { $workspace = $json }
+          }
+          if (-not $workspace) {
+            Get-Content "$env:RUNNER_TEMP\herdr-server.out", "$env:RUNNER_TEMP\herdr-server.err" -ErrorAction SilentlyContinue
+            throw 'herdr server did not come up'
+          }
+          Write-Host "workspace: $workspace"
+
+          # 1. The Windows action: PowerShell runs scripts/browse.ps1, which opens the popup.
+          Invoke-Herdr plugin action invoke browse-windows --plugin herdr-session-manager
+          $logs = ''
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            $logs = Invoke-Herdr plugin log list --plugin herdr-session-manager
+            if ($logs -match '"action_id"\s*:\s*"browse-windows"' -and $logs -notmatch '"status"\s*:\s*"running"') { break }
+          }
+          Write-Host $logs
+          if ($logs -notmatch '"action_id"\s*:\s*"browse-windows"') { throw 'the browse-windows action never ran' }
+          if ($logs -match '"status"\s*:\s*"failed"') { throw 'a plugin command failed' }
+
+          # 2. A manifest pane: herdr resolves ./target/release/hsm to hsm.exe and runs it.
+          $opened = Invoke-Herdr plugin pane open --plugin herdr-session-manager --entrypoint browser --placement tab --focus
+          Write-Host $opened
+          $pane = ($opened | ConvertFrom-Json).result.plugin_pane.pane.pane_id
+          if (-not $pane) { throw 'no pane id in the plugin pane open response' }
+          $screen = ''
+          for ($i = 0; $i -lt 30 -and $screen -notmatch 'sessions'; $i++) {
+            Start-Sleep -Seconds 1
+            $screen = Invoke-Herdr pane read $pane --source visible
+          }
+          Write-Host $screen
+          if ($screen -notmatch 'sessions') { throw 'the session browser did not render in its pane' }
+
+          # 3. Our client over the real named pipe, found the default way (no HERDR_SOCKET_PATH).
+          $env:HERDR_LIVE_REQUIRED = '1'
+          cargo test -p herdr-client --test live_readonly --locked -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'the live named pipe test failed' }
+
+          herdr server stop

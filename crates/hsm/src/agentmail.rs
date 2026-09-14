@@ -50,14 +50,33 @@ fn sibling() -> Option<PathBuf> {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
+    let file = with_exe_suffix(name);
     let named = Path::new(name);
-    if named.is_absolute() || name.contains(std::path::MAIN_SEPARATOR) {
-        return is_executable(named).then(|| named.to_path_buf());
+    // More than one component is a path the user spelled out, `bin/agentmail` included,
+    // whichever separator it uses.
+    if named.is_absolute() || named.components().count() > 1 {
+        return [named.to_path_buf(), PathBuf::from(&file)]
+            .into_iter()
+            .find(|candidate| is_executable(candidate));
     }
-    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|dir| dir.join(&file))
         .find(|candidate| is_executable(candidate))
+}
+
+/// `agentmail` → `agentmail.exe` on Windows, and a name that already says `.exe` stays
+/// as it is.
+fn with_exe_suffix(name: &str) -> String {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let has_suffix = name
+        .len()
+        .checked_sub(suffix.len())
+        .is_some_and(|cut| name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(suffix));
+    if has_suffix {
+        name.to_string()
+    } else {
+        format!("{name}{suffix}")
+    }
 }
 
 #[cfg(unix)]
@@ -368,6 +387,18 @@ mod tests {
 
         let missing = dir.path().join("nope");
         assert!(which(&missing.to_string_lossy()).is_none());
+    }
+
+    #[test]
+    fn a_name_that_already_says_exe_is_not_doubled() {
+        let suffix = std::env::consts::EXE_SUFFIX;
+        assert_eq!(
+            with_exe_suffix(&format!("agentmail{suffix}")),
+            format!("agentmail{suffix}")
+        );
+        assert_eq!(with_exe_suffix("agentmail"), format!("agentmail{suffix}"));
+        #[cfg(windows)]
+        assert_eq!(with_exe_suffix("AGENTMAIL.EXE"), "AGENTMAIL.EXE");
     }
 
     #[test]
