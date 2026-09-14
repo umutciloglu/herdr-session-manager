@@ -51,9 +51,6 @@ jobs:
   install:
     runs-on: windows-latest
     timeout-minutes: 60
-    env:
-      # Kept away from the runner's real profile state, and the same for every step.
-      AGENTMAIL_STATE_DIR: ${{ runner.temp }}\agentmail-state
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +60,10 @@ jobs:
       - name: Install herdr
         shell: pwsh
         run: |
+          # agentmail state away from the runner's profile, the same for every later step.
+          # Job-level env cannot see the runner context, so it is set from here.
+          "AGENTMAIL_STATE_DIR=$env:RUNNER_TEMP\agentmail-state" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
           powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The installer edits the user PATH, which this session does not see.
