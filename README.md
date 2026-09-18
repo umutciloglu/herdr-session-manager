@@ -2,7 +2,7 @@
 
 Session browsing and agent-to-agent chat for people who run many AI coding agents inside [herdr](https://herdr.dev).
 
-> **Early work in progress.** Version 0.1 was built and tested on one machine, macOS with Claude Code and Codex. It works there end to end, but other transcript layouts, harness versions, and workflows have not been exercised yet. Expect rough edges, keep an eye on the [issues](https://github.com/umutciloglu/herdr-session-manager/issues), and please report what breaks. Windows support is a preview, see [Windows](#windows-preview).
+> **Early work in progress.** Version 0.1 was built and tested on one machine, macOS with Claude Code and Codex. It works there end to end, but other transcript layouts, harness versions, and workflows have not been exercised yet. Expect rough edges, keep an eye on the [issues](https://github.com/umutciloglu/herdr-session-manager/issues), and please report what breaks.
 
 herdr already restores your agent panes after a restart. This plugin adds the parts around that:
 
@@ -15,9 +15,9 @@ Two binaries ship together. `hsm` is the herdr plugin. `agentmail` is the chat s
 
 ## Requirements
 
-- herdr 0.9.0 or newer, on macOS or Linux. Windows is a preview.
-- For chat: Claude Code and/or Codex CLI installed.
-- A Rust toolchain only if no prebuilt binary matches your platform. Installs try a checksum-verified download first and fall back to `cargo build`.
+- herdr 0.9.0 or newer, on macOS, Linux or Windows. herdr calls plugins on Windows a preview, and so does this one: CI installs and drives it there on every push, but it has had less real use than the other two.
+- For chat: Claude Code and/or Codex CLI installed. On Windows, reaching a session that is *not* running needs the native `claude.exe` or `codex.exe`; an npm install leaves only a `.cmd` script, which cannot be started that way.
+- A Rust toolchain only if no prebuilt binary matches your platform, plus the Visual Studio C++ Build Tools on Windows. Installs try a checksum-verified download first and fall back to `cargo build`.
 
 ## Install
 
@@ -25,9 +25,9 @@ Two binaries ship together. `hsm` is the herdr plugin. `agentmail` is the chat s
 herdr plugin install umutciloglu/herdr-session-manager
 ```
 
-The build links `hsm` and `agentmail` into `~/.local/bin` so both work by name. If that directory is not on your `PATH`, one marked `export PATH` line is appended to your shell rc. Set `HSM_NO_PATH=1` in herdr's environment to skip both.
+The build links `hsm` and `agentmail` into `~/.local/bin` so both work by name — on Windows, `hsm.cmd` and `agentmail.cmd` in `%USERPROFILE%\.local\bin`. If that directory is not on your `PATH`, one marked `export PATH` line is appended to your shell rc, or the directory is added to your user `PATH`. Set `HSM_NO_PATH=1` in herdr's environment to skip both.
 
-Then add keybindings to `~/.config/herdr/config.toml`. All three actions are optional, bind the ones you want:
+Then add keybindings to `~/.config/herdr/config.toml`, or `%APPDATA%\herdr\config.toml` on Windows. All three actions are optional, bind the ones you want:
 
 ```toml
 # browse, search, open sessions
@@ -52,18 +52,7 @@ command = "herdr-session-manager.setup-chat"
 description = "set up agent chat"
 ```
 
-Reload with `herdr server reload-config`.
-
-## Windows (preview)
-
-herdr calls plugins on Windows a preview, and so does this plugin. CI installs it on a clean Windows machine and runs it against a real herdr. Day-to-day use has not been tested yet.
-
-- Install with the same command. If no release has Windows binaries for the version you install, it builds from source. That needs Rust from [rustup](https://rustup.rs) and the Visual Studio C++ Build Tools.
-- To try a branch before it is released: `herdr plugin install umutciloglu/herdr-session-manager --ref windows-support`.
-- The launchers `hsm.cmd` and `agentmail.cmd` go into `%USERPROFILE%\.local\bin`. That directory is added to your user `PATH` once. `HSM_NO_PATH=1` skips this.
-- Keybindings go into `%APPDATA%\herdr\config.toml`. The action ids end in `-windows`: `herdr-session-manager.browse-windows`, `herdr-session-manager.ask-windows`, `herdr-session-manager.setup-chat-windows`. herdr does not allow the same action id twice, even for different platforms.
-- Sessions in herdr panes work with any Claude Code or Codex install. Running a session headless (`--mode ask`, or a session that is not running) needs the native `claude.exe` or `codex.exe`. An npm install only puts a `.cmd` script on `PATH`, and agentmail cannot start that.
-- State lives in `%LOCALAPPDATA%\hsm` and `%LOCALAPPDATA%\agentmail`. hsm's config is `%APPDATA%\hsm\config.toml`.
+Reload with `herdr server reload-config`. On Windows the action ids end in `-windows` (`herdr-session-manager.browse-windows`, and so on), because herdr refuses the same action id twice even across platforms.
 
 ## First five minutes
 
@@ -108,8 +97,8 @@ agentmail setup | send <addr> "<text>" | inbox | wait | sessions | doctor
 
 ## State on disk
 
-- Session index: `~/.local/state/hsm/index.sqlite`, config in `~/.config/hsm/config.toml`.
-- Mailbox and registry: `~/.local/state/agentmail/`, config alongside.
+- Session index: `~/.local/state/hsm/index.sqlite`, config in `~/.config/hsm/config.toml`. On Windows: `%LOCALAPPDATA%\hsm\index.sqlite` and `%APPDATA%\hsm\config.toml`.
+- Mailbox and registry: `~/.local/state/agentmail/`, config alongside. On Windows: `%LOCALAPPDATA%\agentmail\`.
 - Hooks are added as separate entries beside herdr's own hook files. herdr's files are never edited.
 
 ## Uninstall

@@ -8,7 +8,7 @@ Two tools. `hsm` is the herdr plugin for sessions. `agentmail` is agent-to-agent
 herdr plugin install <owner>/herdr-session-manager
 ```
 
-The build links `hsm` and `agentmail` into `~/.local/bin` and adds that directory to your shell rc if it is not on `PATH`. Open a new shell afterwards. Then bind keys in `~/.config/herdr/config.toml`:
+The build links `hsm` and `agentmail` into `~/.local/bin` and adds that directory to your shell rc if it is not on `PATH` — on Windows, `.cmd` launchers in `%USERPROFILE%\.local\bin` and an entry in your user `PATH`. Open a new shell afterwards. Then bind keys in `~/.config/herdr/config.toml`, or `%APPDATA%\herdr\config.toml` on Windows:
 
 ```toml
 [[keys.command]]
@@ -27,13 +27,9 @@ type = "plugin_action"
 command = "herdr-session-manager.setup-chat"
 ```
 
-Reload with `herdr server reload-config`.
-
-On Windows the file is `%APPDATA%\herdr\config.toml` and the action ids carry a
-`-windows` suffix (`herdr-session-manager.browse-windows`, `.ask-windows`,
-`.setup-chat-windows`), because herdr refuses the same action id twice even across
-platforms. The launchers land in `%USERPROFILE%\.local\bin`. See the README's Windows
-section for the rest.
+Reload with `herdr server reload-config`. On Windows the action ids end in `-windows`
+(`herdr-session-manager.browse-windows`, `.ask-windows`, `.setup-chat-windows`): herdr
+refuses the same action id twice, even across platforms.
 
 ## Session browser
 
