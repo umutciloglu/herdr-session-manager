@@ -113,7 +113,7 @@ pub struct Session {
 
 impl Session {
     pub fn new(harness: HarnessKind, id: impl Into<String>, cwd: impl Into<PathBuf>) -> Self {
-        let cwd = cwd.into();
+        let cwd = crate::paths::without_verbatim_prefix(cwd.into());
         let project = project_of(&cwd);
         Session {
             harness,

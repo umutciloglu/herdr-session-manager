@@ -48,6 +48,76 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+  # Reads real harness stores from the real profile directory, which is what
+  # `dirs::home_dir()` answers on Windows and what no unit test can stand in for.
+  # Writing into the runner's own profile is safe: the machine is thrown away.
+  stores:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build hsm
+        run: cargo build --bin hsm --locked
+
+      - name: Plant a Claude transcript and a Codex rollout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Claude keeps `<cwd slug>/<session id>.jsonl`; the slug is only a fallback,
+          # the cwd inside the file is what hsm reads.
+          $claudeDir = Join-Path $env:USERPROFILE '.claude\projects\C--work-demo'
+          New-Item -ItemType Directory -Force $claudeDir | Out-Null
+          $claude = @'
+{"type":"agent-setting","agentSetting":"claude","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"fix the auth middleware"}]},"uuid":"u3","timestamp":"2026-09-18T11:27:40.000Z","cwd":"C:\\work\\demo","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}
+{"parentUuid":"u3","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the middleware first."}]},"uuid":"a1","timestamp":"2026-09-18T11:27:45.000Z","cwd":"C:\\work\\demo","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}
+'@
+          Set-Content -Path (Join-Path $claudeDir '84fcacde-6b20-49dd-9d9f-9de98138ac24.jsonl') -Value $claude -Encoding utf8
+
+          $codexDir = Join-Path $env:USERPROFILE '.codex\sessions\2026\09\18'
+          New-Item -ItemType Directory -Force $codexDir | Out-Null
+          $codex = @'
+{"timestamp":"2026-09-18T10:04:38.664Z","ordinal":0,"type":"session_meta","payload":{"session_id":"019ffa5d-8515-71f0-bb83-0c02d2b9ceb6","id":"019ffa5d-8515-71f0-bb83-0c02d2b9ceb6","timestamp":"2026-09-18T10:04:20.784Z","cwd":"C:\\work\\demo","originator":"codex-tui","cli_version":"0.154.0","source":"cli","thread_source":"user"}}
+{"timestamp":"2026-09-18T10:04:39.526Z","ordinal":3,"type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"implement the gap recovery plan"}]}}
+{"timestamp":"2026-09-18T10:04:48.471Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"i2","content":[{"type":"Text","text":"Reading the plan first."}]}}}
+'@
+          Set-Content -Path (Join-Path $codexDir 'rollout-2026-09-18T10-04-20-019ffa5d-8515-71f0-bb83-0c02d2b9ceb6.jsonl') -Value $codex -Encoding utf8
+
+      - name: Index and list them
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $hsm = 'target\debug\hsm.exe'
+          # Its own index, so nothing here depends on an earlier run.
+          $env:HSM_STATE_DIR = "$env:RUNNER_TEMP\hsm-state"
+
+          & $hsm index --full
+          if ($LASTEXITCODE -ne 0) { throw 'hsm index failed' }
+
+          $listed = & $hsm sessions --json --limit 20
+          Write-Host $listed
+          $sessions = ($listed | ConvertFrom-Json).sessions
+          $claude = $sessions | Where-Object { $_.address -eq 'claude:84fcacde-6b20-49dd-9d9f-9de98138ac24' }
+          $codex = $sessions | Where-Object { $_.address -eq 'codex:019ffa5d-8515-71f0-bb83-0c02d2b9ceb6' }
+          if (-not $claude) { throw 'the Claude transcript was not indexed' }
+          if (-not $codex) { throw 'the Codex rollout was not indexed' }
+
+          # The cwd is read out of the file, so it must survive as a Windows path.
+          if ($claude.cwd -ne 'C:\work\demo') { throw "Claude cwd came back as '$($claude.cwd)'" }
+          if ($claude.project -ne 'demo') { throw "Claude project came back as '$($claude.project)'" }
+          if ($codex.project -ne 'demo') { throw "Codex project came back as '$($codex.project)'" }
+          if ($claude.first_prompt -notmatch 'auth middleware') { throw 'the first prompt was not read' }
+
+          # Full-text search over what was indexed from those files.
+          $found = (& $hsm sessions --json --query 'middleware' | ConvertFrom-Json).sessions
+          if (-not ($found | Where-Object { $_.address -eq $claude.address })) { throw 'search did not find the Claude session' }
+
   install:
     runs-on: windows-latest
     timeout-minutes: 60

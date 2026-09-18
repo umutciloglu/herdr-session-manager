@@ -445,8 +445,10 @@ fn upsert_process(conn: &Connection, r: &RunningRef) -> Result<()> {
 /// transcript parse already established.
 fn upsert_pane(conn: &Connection, r: &HerdrRef) -> Result<()> {
     let pane_json = serde_json::to_string(&r.pane).unwrap_or_else(|_| "null".to_string());
-    let cwd = r.cwd.to_string_lossy().into_owned();
-    let project = project_of(&r.cwd);
+    // The same rule as a transcript-sourced row: one spelling of one directory.
+    let pane_cwd = paths::without_verbatim_prefix(r.cwd.clone());
+    let cwd = pane_cwd.to_string_lossy().into_owned();
+    let project = project_of(&pane_cwd);
     // A live pane is the only activity signal for a harness whose store we do
     // not read. Where we do read one, its timestamps are accurate and must not
     // be overwritten with "now" just because the pane is open.
