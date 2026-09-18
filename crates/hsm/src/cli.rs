@@ -81,6 +81,9 @@ enum Command {
 
     /// Install or remove the agentmail MCP server and hooks (runs `agentmail setup`).
     SetupChat,
+
+    /// Report what is wrong, and nothing else. Exits 1 when it found something.
+    Doctor,
 }
 
 pub fn main() -> ExitCode {
@@ -128,6 +131,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
         // broken plugin, and a stale index is not that.
         Command::Startup => return Ok(commands::startup::run(&ctx)),
         Command::SetupChat => return Ok(commands::setup_chat::run(&ctx)),
+        // Non-zero when it printed a problem, so a script can act on it.
+        Command::Doctor => {
+            return Ok(match commands::doctor::run(&ctx)? {
+                true => ExitCode::SUCCESS,
+                false => ExitCode::FAILURE,
+            })
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

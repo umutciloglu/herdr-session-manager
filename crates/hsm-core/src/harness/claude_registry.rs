@@ -49,7 +49,7 @@ struct Entry {
 }
 
 pub fn registry_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude/sessions"))
+    crate::harness::registry::claude_home().map(|h| h.join("sessions"))
 }
 
 /// Every process in `dir` that is still alive. A missing directory means no

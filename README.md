@@ -100,7 +100,7 @@ An address is `<harness>:<session id>`, for example `codex:01a09638`. An eight-c
 ## Commands
 
 ```
-hsm browse | ask | open <addr> | index | sessions [--json] | startup | setup-chat
+hsm browse | ask | open <addr> | index | sessions [--json] | startup | setup-chat | doctor
 agentmail setup | send <addr> "<text>" | inbox | wait | sessions | doctor
 ```
 
