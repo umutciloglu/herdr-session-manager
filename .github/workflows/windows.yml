@@ -73,20 +73,22 @@ jobs:
           # the cwd inside the file is what hsm reads.
           $claudeDir = Join-Path $env:USERPROFILE '.claude\projects\C--work-demo'
           New-Item -ItemType Directory -Force $claudeDir | Out-Null
-          $claude = @'
-{"type":"agent-setting","agentSetting":"claude","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}
-{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"fix the auth middleware"}]},"uuid":"u3","timestamp":"2026-09-18T11:27:40.000Z","cwd":"C:\\work\\demo","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}
-{"parentUuid":"u3","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the middleware first."}]},"uuid":"a1","timestamp":"2026-09-18T11:27:45.000Z","cwd":"C:\\work\\demo","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}
-'@
+          # One single-quoted line per transcript line: a PowerShell here-string would
+          # have to start at column 0, which ends the YAML block.
+          $claude = @(
+            '{"type":"agent-setting","agentSetting":"claude","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}',
+            '{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"fix the auth middleware"}]},"uuid":"u3","timestamp":"2026-09-18T11:27:40.000Z","cwd":"C:\\work\\demo","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}',
+            '{"parentUuid":"u3","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the middleware first."}]},"uuid":"a1","timestamp":"2026-09-18T11:27:45.000Z","cwd":"C:\\work\\demo","sessionId":"84fcacde-6b20-49dd-9d9f-9de98138ac24"}'
+          )
           Set-Content -Path (Join-Path $claudeDir '84fcacde-6b20-49dd-9d9f-9de98138ac24.jsonl') -Value $claude -Encoding utf8
 
           $codexDir = Join-Path $env:USERPROFILE '.codex\sessions\2026\09\18'
           New-Item -ItemType Directory -Force $codexDir | Out-Null
-          $codex = @'
-{"timestamp":"2026-09-18T10:04:38.664Z","ordinal":0,"type":"session_meta","payload":{"session_id":"019ffa5d-8515-71f0-bb83-0c02d2b9ceb6","id":"019ffa5d-8515-71f0-bb83-0c02d2b9ceb6","timestamp":"2026-09-18T10:04:20.784Z","cwd":"C:\\work\\demo","originator":"codex-tui","cli_version":"0.154.0","source":"cli","thread_source":"user"}}
-{"timestamp":"2026-09-18T10:04:39.526Z","ordinal":3,"type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"implement the gap recovery plan"}]}}
-{"timestamp":"2026-09-18T10:04:48.471Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"i2","content":[{"type":"Text","text":"Reading the plan first."}]}}}
-'@
+          $codex = @(
+            '{"timestamp":"2026-09-18T10:04:38.664Z","ordinal":0,"type":"session_meta","payload":{"session_id":"019ffa5d-8515-71f0-bb83-0c02d2b9ceb6","id":"019ffa5d-8515-71f0-bb83-0c02d2b9ceb6","timestamp":"2026-09-18T10:04:20.784Z","cwd":"C:\\work\\demo","originator":"codex-tui","cli_version":"0.154.0","source":"cli","thread_source":"user"}}',
+            '{"timestamp":"2026-09-18T10:04:39.526Z","ordinal":3,"type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"implement the gap recovery plan"}]}}',
+            '{"timestamp":"2026-09-18T10:04:48.471Z","ordinal":11,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"i2","content":[{"type":"Text","text":"Reading the plan first."}]}}}'
+          )
           Set-Content -Path (Join-Path $codexDir 'rollout-2026-09-18T10-04-20-019ffa5d-8515-71f0-bb83-0c02d2b9ceb6.jsonl') -Value $codex -Encoding utf8
 
       - name: Index and list them
