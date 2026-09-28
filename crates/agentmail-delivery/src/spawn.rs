@@ -56,13 +56,45 @@ impl CommandRunner for TokioCommandRunner {
         }
         // stdin is closed: a headless harness run must never wait on a terminal.
         cmd.stdin(std::process::Stdio::null());
-        let out = cmd.output().await?;
+        let out = match cmd.output().await {
+            Ok(out) => out,
+            #[cfg(windows)]
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                return Err(
+                    match script_shim_hint(&spec.program, std::env::split_paths(&path)) {
+                        Some(hint) => std::io::Error::new(e.kind(), hint),
+                        None => e,
+                    },
+                );
+            }
+            Err(e) => return Err(e),
+        };
         Ok(CommandOutput {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+}
+
+/// An npm install puts `claude.cmd` or `codex.cmd` on PATH, not an `.exe`. Rust starts
+/// only real executables by bare name, and it refuses the line breaks every envelope
+/// carries as arguments to a batch file, so such an install cannot be driven headless.
+/// Name the shim instead of reporting a program that seems not to exist.
+#[cfg(any(windows, test))]
+fn script_shim_hint(program: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Option<String> {
+    let shim = dirs.into_iter().find_map(|dir| {
+        ["cmd", "bat"]
+            .iter()
+            .map(|ext| dir.join(format!("{program}.{ext}")))
+            .find(|candidate| candidate.is_file())
+    })?;
+    Some(format!(
+        "{program} is only installed as the script {}, which agentmail cannot start; \
+         install the native {program}.exe",
+        shim.display()
+    ))
 }
 
 /// What `Spawner` hands to a pane adapter. Kept as a struct so the `herdr` feature can
@@ -557,5 +589,18 @@ mod tests {
             Some("8890a685-1111-2222-3333-444444444444".to_string())
         );
         assert_eq!(session_id_in("no id here"), None);
+    }
+
+    #[test]
+    fn an_npm_shim_is_named_instead_of_a_missing_program() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let npm = tempfile::tempdir().expect("tempdir");
+        std::fs::write(npm.path().join("claude.cmd"), "@echo off\r\n").expect("write");
+        let dirs = || vec![empty.path().to_path_buf(), npm.path().to_path_buf()];
+
+        let hint = script_shim_hint("claude", dirs()).expect("hint");
+        assert!(hint.contains("claude.cmd"), "{hint}");
+        assert!(hint.contains("claude.exe"), "{hint}");
+        assert_eq!(script_shim_hint("codex", dirs()), None);
     }
 }

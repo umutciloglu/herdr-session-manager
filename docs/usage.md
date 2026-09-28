@@ -8,7 +8,7 @@ Two tools. `hsm` is the herdr plugin for sessions. `agentmail` is agent-to-agent
 herdr plugin install <owner>/herdr-session-manager
 ```
 
-The build links `hsm` and `agentmail` into `~/.local/bin` and adds that directory to your shell rc if it is not on `PATH`. Open a new shell afterwards. Then bind keys in `~/.config/herdr/config.toml`:
+The build links `hsm` and `agentmail` into `~/.local/bin` and adds that directory to your shell rc if it is not on `PATH` — on Windows, `.cmd` launchers in `%USERPROFILE%\.local\bin` and an entry in your user `PATH`. Open a new shell afterwards. Then bind keys in `~/.config/herdr/config.toml`, or `%APPDATA%\herdr\config.toml` on Windows:
 
 ```toml
 [[keys.command]]
@@ -27,7 +27,9 @@ type = "plugin_action"
 command = "herdr-session-manager.setup-chat"
 ```
 
-Reload with `herdr server reload-config`.
+Reload with `herdr server reload-config`. On Windows the action ids end in `-windows`
+(`herdr-session-manager.browse-windows`, `.ask-windows`, `.setup-chat-windows`): herdr
+refuses the same action id twice, even across platforms.
 
 ## Session browser
 
@@ -84,6 +86,7 @@ hsm index [--full]      refresh the index
 hsm sessions [--json]   list; --query accepts text or an address prefix
 hsm startup             what the plugin runs after herdr restores a session
 hsm setup-chat          runs agentmail setup
+hsm doctor              prints problems only; exits 1 when it found any
 ```
 
 Config at `~/.config/hsm/config.toml`:
@@ -102,7 +105,12 @@ open_split = "o"
 
 Letters type into the search box until you press `Esc`; `alt-<letter>` acts anywhere. A configured key wins over the built-in one with the same letter. Jumping lives on the `jump` key alone, so `Enter` jumps only while `jump = "enter"`, the default; bind it elsewhere and `Enter` goes back to plain opening.
 
-Index and state live in `~/.local/state/hsm`.
+Index and state live in `~/.local/state/hsm` (`%LOCALAPPDATA%\hsm` on Windows, with config
+in `%APPDATA%\hsm`).
+
+Transcripts are read from where each harness keeps them: `CLAUDE_CONFIG_DIR` else
+`~/.claude`, and `CODEX_HOME` else `~/.codex`, with Codex's thread index in
+`CODEX_SQLITE_HOME` when that is set. Codex's own `sqlite_home` setting is not read.
 
 ## Agent chat
 
@@ -165,6 +173,16 @@ codex_extra_args = []
 
 ## When something looks wrong
 
+- **Start with `hsm doctor`.** It prints one line per problem and nothing when there is
+  none: stores that are not where it looks, a herdr it cannot reach, files it could not
+  read, an empty index.
+- **The list is empty.** The harness has recorded nothing on this machine, or its store
+  moved: check `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. `hsm index --full` prints how many
+  files it scanned.
+- **Nothing is marked `live` while agents are running.** herdr reports which session a
+  pane holds only when that harness's integration is installed. `herdr integration status`
+  lists them, `herdr integration install codex` adds one. Without it herdr knows the agent
+  but not its session, and the row stays unlinked.
 - **A card in Claude's `@` list is thin or stale.** The MCP process for that session predates a rebuild. Run `/mcp` and reconnect, or restart the session.
 - **A message says queued and nothing happens.** The target is busy or in a dialog. It gets the mail when its turn ends. `agentmail inbox --addr <addr>` shows the row.
 - **Two copies of a message.** Two hook entries pointed at different copies of the binary. Run `agentmail setup` once; it collapses duplicates.

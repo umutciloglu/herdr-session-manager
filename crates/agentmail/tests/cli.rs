@@ -23,6 +23,21 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
+/// What the first hook entry for `event` runs, as one line. Claude's exec form (used on
+/// Windows) keeps the arguments in `args`; a shell line keeps them in `command`.
+fn hook_line(settings: &str, event: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(settings).unwrap_or_default();
+    let entry = &v["hooks"][event][0]["hooks"][0];
+    let command = entry["command"].as_str().unwrap_or_default();
+    match entry["args"].as_array() {
+        Some(args) => std::iter::once(command)
+            .chain(args.iter().filter_map(|a| a.as_str()))
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => command.to_string(),
+    }
+}
+
 #[test]
 fn setup_installs_into_a_temp_home_and_check_agrees() {
     let home = tempfile::tempdir().expect("home");
@@ -48,8 +63,14 @@ fn setup_installs_into_a_temp_home_and_check_agrees() {
     );
 
     let settings = read(&home.path().join(".claude/settings.json"));
-    assert!(settings.contains("hook claude-stop"), "{settings}");
-    assert!(settings.contains("hook claude-session-start"), "{settings}");
+    assert!(
+        hook_line(&settings, "Stop").ends_with("hook claude-stop"),
+        "{settings}"
+    );
+    assert!(
+        hook_line(&settings, "SessionStart").ends_with("hook claude-session-start"),
+        "{settings}"
+    );
 
     let claude_json = read(&home.path().join(".claude.json"));
     assert!(claude_json.contains("\"mcpServers\""), "{claude_json}");

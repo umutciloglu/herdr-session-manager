@@ -1,4 +1,5 @@
 pub mod browse;
+pub mod doctor;
 pub mod index;
 pub mod open;
 pub mod sessions;

@@ -5,18 +5,18 @@
 use std::time::Duration;
 
 use interprocess::local_socket::tokio::prelude::*;
-use interprocess::local_socket::tokio::{Listener, Stream};
+use interprocess::local_socket::tokio::Listener;
 use interprocess::local_socket::{ListenerOptions, Name};
 
 use crate::domain::Registration;
 use crate::error::Result;
+use crate::paths::Paths;
 
 #[cfg(not(windows))]
 use std::path::PathBuf;
 
 #[cfg(not(windows))]
-use crate::paths::Paths;
-
+use interprocess::local_socket::tokio::Stream;
 #[cfg(not(windows))]
 use interprocess::local_socket::GenericFilePath;
 #[cfg(windows)]
@@ -28,13 +28,13 @@ pub fn endpoint(reg: &Registration) -> Result<String> {
     if let Some(p) = reg.poke_path.as_deref().filter(|p| !p.is_empty()) {
         return Ok(p.to_string());
     }
+    let paths = Paths::from_env()?;
     #[cfg(windows)]
     {
-        Ok(crate::paths::poke_name(&reg.harness, &reg.session_id))
+        Ok(paths.poke_pipe(&reg.harness, &reg.session_id))
     }
     #[cfg(not(windows))]
     {
-        let paths = Paths::from_env()?;
         Ok(paths
             .poke_socket(&reg.harness, &reg.session_id)
             .to_string_lossy()
@@ -106,6 +106,7 @@ pub struct Poker;
 
 impl Poker {
     /// `Ok(false)` means nobody is listening — a normal outcome, not an error.
+    #[cfg(not(windows))]
     pub async fn poke(reg: &Registration) -> Result<bool> {
         let endpoint = endpoint(reg)?;
         let name = to_name(&endpoint)?;
@@ -117,9 +118,31 @@ impl Poker {
             Err(_) => Ok(false),
         }
     }
+
+    /// `Ok(false)` means nobody is listening — a normal outcome, not an error.
+    ///
+    /// Opened with tokio rather than interprocess: when every instance of the pipe is
+    /// taken, interprocess waits for a free one with no end and ignores any timeout.
+    #[cfg(windows)]
+    pub async fn poke(reg: &Registration) -> Result<bool> {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        const ERROR_PIPE_BUSY: i32 = 231;
+
+        let endpoint = endpoint(reg)?;
+        // The namespace interprocess puts a namespaced listener name in.
+        match ClientOptions::new().open(format!(r"\\.\pipe\{endpoint}")) {
+            Ok(client) => {
+                drop(client);
+                Ok(true)
+            }
+            // Every instance taken means the owner is alive and reads the store on its
+            // next wake-up, which is what a poke asks for.
+            Err(e) => Ok(e.raw_os_error() == Some(ERROR_PIPE_BUSY)),
+        }
+    }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::Harness;
@@ -156,6 +179,7 @@ mod tests {
         assert!(!Poker::poke(&r).await.expect("poke"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bind_clears_a_stale_socket_file() {
         let dir = tempfile::tempdir().expect("tempdir");

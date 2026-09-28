@@ -100,7 +100,7 @@ impl ThreadRow {
     }
 
     fn into_session(self) -> Session {
-        let path = PathBuf::from(&self.rollout_path);
+        let path = crate::paths::without_verbatim_prefix(PathBuf::from(&self.rollout_path));
         let stat = jsonl::stat(&path).ok();
 
         let mut s = Session::new(HarnessKind::Codex, self.id, PathBuf::from(&self.cwd));

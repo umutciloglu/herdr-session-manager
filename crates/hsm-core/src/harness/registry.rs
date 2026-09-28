@@ -54,19 +54,43 @@ pub fn has_transcript_store(kind: &HarnessKind) -> bool {
 
 /// Where a harness keeps its transcripts. Empty for kinds we cannot read.
 pub fn transcript_roots(kind: &HarnessKind) -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
     match kind {
-        HarnessKind::Claude => vec![home.join(".claude/projects")],
-        HarnessKind::Codex => vec![home.join(".codex/sessions")],
-        _ => Vec::new(),
+        HarnessKind::Claude => claude_home().map(|h| vec![h.join("projects")]),
+        HarnessKind::Codex => codex_home().map(|h| vec![h.join("sessions")]),
+        _ => None,
     }
+    .unwrap_or_default()
+}
+
+/// `CLAUDE_CONFIG_DIR`, else `~/.claude` — the rule Claude Code itself follows.
+pub fn claude_home() -> Option<PathBuf> {
+    home_or(env_dir("CLAUDE_CONFIG_DIR"), ".claude")
+}
+
+/// `CODEX_HOME`, else `~/.codex` — the rule Codex itself follows.
+pub fn codex_home() -> Option<PathBuf> {
+    home_or(env_dir("CODEX_HOME"), ".codex")
+}
+
+/// Pure so the order is testable without touching the environment.
+fn home_or(override_dir: Option<PathBuf>, leaf: &str) -> Option<PathBuf> {
+    override_dir.or_else(|| dirs::home_dir().map(|home| home.join(leaf)))
 }
 
 /// Codex's own thread index, read-only. Absent on a fresh install.
+///
+/// Codex puts it in `CODEX_SQLITE_HOME` when that is set, else in its home. The
+/// `sqlite_home` setting in `config.toml` can move it too; that one is not read here.
 pub fn codex_state_db() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex/state_5.sqlite"))
+    env_dir("CODEX_SQLITE_HOME")
+        .or_else(codex_home)
+        .map(|h| h.join("state_5.sqlite"))
+}
+
+fn env_dir(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -76,6 +100,16 @@ mod tests {
     fn args(kind: HarnessKind, value: &str) -> Option<Vec<String>> {
         let r = SessionRef::id(kind.clone(), value);
         resume_args(&kind, &r)
+    }
+
+    #[test]
+    fn a_harness_home_override_wins_over_the_user_home() {
+        let moved = PathBuf::from("/elsewhere/claude");
+        assert_eq!(home_or(Some(moved.clone()), ".claude"), Some(moved));
+        assert_eq!(
+            home_or(None, ".codex"),
+            dirs::home_dir().map(|h| h.join(".codex"))
+        );
     }
 
     #[test]

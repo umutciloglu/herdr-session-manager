@@ -2,13 +2,18 @@
 //! they need one running; nothing here mutates session state.
 //!
 //! `cargo test -p herdr-client -- --ignored --nocapture`
-#![cfg(unix)]
+//!
+//! Set `HERDR_LIVE_REQUIRED=1` to fail instead of skip when no server answers. CI uses
+//! that on Windows, where this is the only test of the real named pipe.
 
 use herdr_client::{HerdrClient, PaneRead, ReadSource};
 
 async fn client() -> Option<HerdrClient> {
     match HerdrClient::connect().await {
         Ok(client) => Some(client),
+        Err(error) if std::env::var_os("HERDR_LIVE_REQUIRED").is_some() => {
+            panic!("no herdr server: {error}")
+        }
         Err(error) => {
             eprintln!("no herdr server: {error}");
             None

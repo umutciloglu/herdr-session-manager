@@ -34,5 +34,9 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Only for the 8.3 short path in Windows hook lines (setup::short_dir_path).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile.workspace = true
