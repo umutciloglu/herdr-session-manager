@@ -12,7 +12,10 @@ use std::process::Command;
 use crate::ctx::exe_path;
 
 const MCP_NAME: &str = "agentmail";
-const CHANNEL_FLAG: &str = "--dangerously-load-development-channels server:agentmail";
+/// The Claude Code plugin's id: its name in claude-plugin/agentmail/.claude-plugin/
+/// plugin.json, at the marketplace name in .claude-plugin/marketplace.json.
+const PLUGIN_ID: &str = "agentmail@herdr-session-manager";
+const CHANNEL_FLAG: &str = "--dangerously-load-development-channels";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -41,6 +44,10 @@ pub struct Setup {
     /// because they would happily write to the real configuration instead.
     real_home: bool,
     exe: String,
+    /// The agentmail Claude Code plugin's id, when it is enabled. It brings
+    /// the Claude MCP server and hooks itself, so ours would only make every message
+    /// arrive twice.
+    plugin: Option<String>,
 }
 
 impl Setup {
@@ -53,11 +60,57 @@ impl Setup {
                 .ok_or_else(|| anyhow::anyhow!("no home directory; pass --home"))?,
         };
         let real_home = real.as_deref() == Some(home.as_path());
+        let plugin = edits::claude_plugin_enabled(
+            &read(&home.join(".claude").join("settings.json")),
+            &read(
+                &home
+                    .join(".claude")
+                    .join("plugins")
+                    .join("installed_plugins.json"),
+            ),
+            PLUGIN_ID,
+        )
+        .then(|| PLUGIN_ID.to_string());
         Ok(Setup {
             home,
             real_home,
             exe: exe_path().to_string_lossy().into_owned(),
+            plugin,
         })
+    }
+
+    /// Rows the plugin takes over once it is enabled.
+    fn plugin_provides(&self, kind: Kind) -> bool {
+        self.plugin.is_some()
+            && matches!(
+                kind,
+                Kind::ClaudeMcp | Kind::ClaudeStop | Kind::ClaudeSessionStart
+            )
+    }
+
+    /// Entries an earlier `setup` installed that the plugin now duplicates.
+    fn duplicates(&self) -> Vec<Kind> {
+        ITEMS
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|k| self.plugin_provides(*k) && self.installed(*k))
+            .collect()
+    }
+
+    /// Claude names a plugin's channel by plugin id, a hand-registered one by server.
+    fn channel_flag(&self) -> String {
+        match &self.plugin {
+            Some(id) => format!("{CHANNEL_FLAG} plugin:{id}"),
+            None => format!("{CHANNEL_FLAG} server:{MCP_NAME}"),
+        }
+    }
+
+    fn label(&self, kind: Kind, label: &str) -> String {
+        match (self.plugin_provides(kind), self.installed(kind)) {
+            (true, true) => format!("{label} (duplicate)"),
+            (true, false) => format!("{label} (plugin)"),
+            _ => label.to_string(),
+        }
     }
 
     fn claude_settings(&self) -> PathBuf {
@@ -157,11 +210,16 @@ impl Setup {
     pub fn items(&self) -> Vec<tui::ItemState> {
         ITEMS
             .iter()
-            .map(|(kind, label)| tui::ItemState {
-                label: (*label).to_string(),
-                file: short_path(&self.file(*kind), &self.home),
-                installed: self.installed(*kind),
-                informational: *kind == Kind::ChannelHint,
+            .map(|(kind, label)| {
+                let installed = self.installed(*kind);
+                tui::ItemState {
+                    label: self.label(*kind, label),
+                    file: short_path(&self.file(*kind), &self.home),
+                    installed,
+                    // A duplicate stays a real row, so it can be unticked and removed.
+                    informational: *kind == Kind::ChannelHint
+                        || (self.plugin_provides(*kind) && !installed),
+                }
             })
             .collect()
     }
@@ -174,6 +232,9 @@ impl Setup {
     }
 
     fn install(&self, kind: Kind) -> anyhow::Result<()> {
+        if let (true, Some(id)) = (self.plugin_provides(kind), &self.plugin) {
+            anyhow::bail!("the Claude Code plugin {id} already provides this");
+        }
         if Self::hook_spec(kind).is_some() {
             self.write_hook(kind, true)?;
             return Ok(());
@@ -182,7 +243,7 @@ impl Setup {
             Kind::ClaudeMcp => self.install_claude_mcp(),
             Kind::CodexMcp => self.install_codex_mcp(),
             Kind::ChannelHint => {
-                print_channel_hint();
+                print_channel_hint(&self.channel_flag());
                 Ok(())
             }
             _ => Ok(()),
@@ -280,16 +341,22 @@ impl Setup {
 
     fn print(&self) {
         println!("agentmail setup · home {}", self.home.display());
-        println!("binary {}\n", self.exe);
+        println!("binary {}", self.exe);
+        if let Some(id) = &self.plugin {
+            println!("plugin {id} provides the Claude MCP server and hooks");
+        }
+        println!();
         for (n, (kind, label)) in ITEMS.iter().enumerate() {
             let mark = match kind {
-                Kind::ChannelHint => "-".to_string(),
-                _ if self.installed(*kind) => "x".to_string(),
-                _ => " ".to_string(),
+                Kind::ChannelHint => "-",
+                _ if self.installed(*kind) => "x",
+                _ if self.plugin_provides(*kind) => "-",
+                _ => " ",
             };
             println!(
-                "{:>2} [{mark}] {label:<34} {}",
+                "{:>2} [{mark}] {:<34} {}",
                 n + 1,
+                self.label(*kind, label),
                 short_path(&self.file(*kind), &self.home)
             );
         }
@@ -299,9 +366,55 @@ impl Setup {
         ITEMS
             .iter()
             .map(|(k, _)| *k)
-            .filter(|k| *k != Kind::ChannelHint && !self.installed(*k))
+            .filter(|k| *k != Kind::ChannelHint && !self.plugin_provides(*k) && !self.installed(*k))
             .collect()
     }
+
+    fn remove_duplicates(&self) -> anyhow::Result<()> {
+        for kind in self.duplicates() {
+            self.uninstall(kind)?;
+            println!("removed {} (the plugin provides it)", label_of(kind));
+        }
+        Ok(())
+    }
+
+    /// Asks once, before any screen opens. Enter means yes: two copies always deliver
+    /// every message twice, so keeping them is the choice that needs typing.
+    fn offer_to_remove_duplicates(&self) -> anyhow::Result<()> {
+        let Some(id) = &self.plugin else {
+            return Ok(());
+        };
+        let dups = self.duplicates();
+        if dups.is_empty() {
+            return Ok(());
+        }
+        println!("The Claude Code plugin {id} brings its own MCP server and hooks.");
+        println!("An earlier `agentmail setup` installed these too, so every message would arrive twice:");
+        for kind in &dups {
+            println!("  {}", label_of(*kind));
+        }
+        print!("Remove them? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        // No answer at all (a closed stdin) changes nothing.
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            println!();
+            return Ok(());
+        }
+        if matches!(line.trim(), "" | "y" | "Y" | "yes") {
+            self.remove_duplicates()?;
+        }
+        println!();
+        Ok(())
+    }
+}
+
+fn label_of(kind: Kind) -> &'static str {
+    ITEMS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, label)| *label)
+        .unwrap_or("")
 }
 
 impl tui::Installer for Setup {
@@ -322,7 +435,8 @@ impl tui::Installer for Setup {
     }
 
     fn hint(&self) -> Vec<String> {
-        vec![format!("claude {CHANNEL_FLAG}"), profile_shortcut()]
+        let flag = self.channel_flag();
+        vec![format!("claude {flag}"), profile_shortcut(&flag)]
     }
 }
 
@@ -344,23 +458,37 @@ pub fn run(check: bool, yes: bool, home: Option<PathBuf>) -> anyhow::Result<i32>
     if check {
         setup.print();
         let missing = setup.missing();
-        if missing.is_empty() {
+        let duplicates = setup.duplicates();
+        if missing.is_empty() && duplicates.is_empty() {
             println!("\neverything is installed");
             return Ok(0);
         }
-        println!("\n{} item(s) missing", missing.len());
+        if !missing.is_empty() {
+            println!("\n{} item(s) missing", missing.len());
+        }
+        if !duplicates.is_empty() {
+            println!(
+                "\n{} item(s) duplicate the Claude Code plugin; run `agentmail setup` to remove them",
+                duplicates.len()
+            );
+        }
         return Ok(1);
     }
 
     if yes {
+        // "Without asking" covers the duplicates too: keeping them is never what
+        // someone who installed the plugin wants.
+        setup.remove_duplicates()?;
         for kind in setup.missing() {
             setup.install(kind)?;
         }
         setup.print();
         print_codex_trust_note();
-        print_channel_hint();
+        print_channel_hint(&setup.channel_flag());
         return Ok(0);
     }
+
+    setup.offer_to_remove_duplicates()?;
 
     // A pipe, a CI job or a harness action gets the plain list; only a real terminal
     // gets the screen, which would otherwise write escape codes into somebody's log.
@@ -398,10 +526,14 @@ fn plain_loop(setup: Setup) -> anyhow::Result<i32> {
             other => match other.parse::<usize>() {
                 Ok(n) if (1..=ITEMS.len()).contains(&n) => {
                     let kind = ITEMS[n - 1].0;
-                    if setup.installed(kind) {
-                        setup.uninstall(kind)?;
+                    let result = if setup.installed(kind) {
+                        setup.uninstall(kind)
                     } else {
-                        setup.install(kind)?;
+                        setup.install(kind)
+                    };
+                    // A row the plugin provides refuses to install; say so and stay.
+                    if let Err(e) = result {
+                        println!("{e}");
                     }
                 }
                 _ => println!("not an item: {other}"),
@@ -417,20 +549,20 @@ fn print_codex_trust_note() {
     println!("\nCodex asks you to trust its hooks once after each change to hooks.json.");
 }
 
-fn print_channel_hint() {
+fn print_channel_hint(flag: &str) {
     println!("\nClaude only opens a channel when it is launched with:\n");
-    println!("  claude {CHANNEL_FLAG}\n");
+    println!("  claude {flag}\n");
     println!("Add this to your shell profile yourself if you want it by default:\n");
-    println!("  {}\n", profile_shortcut());
+    println!("  {}\n", profile_shortcut(flag));
 }
 
 /// The launch shortcut for the user's own profile. Windows means PowerShell, where an
 /// alias cannot carry arguments, so it gets a function instead.
-fn profile_shortcut() -> String {
+fn profile_shortcut(flag: &str) -> String {
     if cfg!(windows) {
-        format!("function claude-mail {{ claude {CHANNEL_FLAG} @args }}")
+        format!("function claude-mail {{ claude {flag} @args }}")
     } else {
-        format!("alias claude-mail='claude {CHANNEL_FLAG}'")
+        format!("alias claude-mail='claude {flag}'")
     }
 }
 

@@ -2,6 +2,10 @@
 # about, and publishes them with the checksums that script verifies. Tag a version
 # (`git tag v0.1.0 && git push --tags`) and the release appears with:
 #   hsm-<triple>, agentmail-<triple>, SHA256SUMS, COMMIT
+#
+# Bump the version in Cargo.toml, herdr-plugin.toml and
+# claude-plugin/agentmail/.claude-plugin/plugin.json together before tagging; the
+# `version` job refuses a tag that any of them disagrees with.
 name: release
 
 on:
@@ -13,7 +17,29 @@ permissions:
   contents: write
 
 jobs:
+  # Each installer downloads the release named by its own manifest: fetch-or-build by
+  # Cargo.toml, the Claude Code plugin's launcher by plugin.json. A manifest that lags
+  # the tag would send its users to an older release, or to one that does not exist.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every manifest names the tag's version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo=$(grep -E '^version *= *"' Cargo.toml | head -n 1 | sed -E 's/^version *= *"([^"]+)".*/\1/')
+          herdr=$(grep -E '^version *= *"' herdr-plugin.toml | head -n 1 | sed -E 's/^version *= *"([^"]+)".*/\1/')
+          plugin=$(jq -r .version claude-plugin/agentmail/.claude-plugin/plugin.json)
+          echo "tag $tag · Cargo.toml $cargo · herdr-plugin.toml $herdr · plugin.json $plugin"
+          [ "$cargo" = "$tag" ] && [ "$herdr" = "$tag" ] && [ "$plugin" = "$tag" ] || {
+            echo "::error::version mismatch: bump every manifest to $tag before tagging"
+            exit 1
+          }
+
   build:
+    needs: version
     name: ${{ matrix.triple }}
     runs-on: ${{ matrix.os }}
     strategy:

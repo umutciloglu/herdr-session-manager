@@ -1,0 +1,13 @@
+{
+  "name": "agentmail",
+  "version": "0.1.2",
+  "description": "Agent-to-agent mail between Claude Code, Codex and other sessions: the agentmail MCP server plus its Stop and SessionStart hooks.",
+  "author": {
+    "name": "Umut Çiloğlu",
+    "url": "https://github.com/umutciloglu"
+  },
+  "homepage": "https://github.com/umutciloglu/herdr-session-manager",
+  "repository": "https://github.com/umutciloglu/herdr-session-manager",
+  "license": "MIT",
+  "keywords": ["agentmail", "mcp", "codex", "multi-agent", "herdr"]
+}

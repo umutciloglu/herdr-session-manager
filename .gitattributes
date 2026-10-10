@@ -1,0 +1,5 @@
+# The Claude Code plugin is installed from a git checkout, Windows included, where
+# core.autocrlf would hand Git Bash a launcher whose every line ends in \r.
+claude-plugin/agentmail/scripts/agentmail text eol=lf
+# cmd.exe misreads labels and long lines in a batch file with bare LF endings.
+claude-plugin/agentmail/scripts/*.cmd text eol=crlf

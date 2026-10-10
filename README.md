@@ -54,6 +54,26 @@ description = "set up agent chat"
 
 Reload with `herdr server reload-config`. On Windows the action ids end in `-windows` (`herdr-session-manager.browse-windows`, and so on), because herdr refuses the same action id twice even across platforms.
 
+## Claude Code plugin
+
+The chat side for Claude Code also comes as a Claude Code plugin. It works with or without herdr. Run this inside Claude Code:
+
+```
+/plugin install agentmail --marketplace umutciloglu/herdr-session-manager
+```
+
+It bundles the agentmail MCP server and the Claude Stop and SessionStart hooks. These are the three Claude rows of `agentmail setup`. The plugin carries no binary. On first start it downloads the release binary for its own version and your platform, and checks it against the release's `SHA256SUMS`. Prebuilt binaries exist for macOS (Apple Silicon and Intel), Linux x86_64 and Windows x86_64. On Windows the hooks run through Git Bash, so Git for Windows must be installed. `claude-plugin/agentmail/README.md` has the details.
+
+Codex still needs `agentmail setup`. The plugin does not put `agentmail` on your `PATH` either, so `agentmail send` and the other commands need the herdr install above.
+
+With the plugin, channels are named after it:
+
+```sh
+claude --dangerously-load-development-channels plugin:agentmail@herdr-session-manager
+```
+
+Ran `agentmail setup` before installing the plugin? Run it once more. It sees the plugin and offers to remove its own Claude MCP server and hooks. Keep both and every message arrives twice. From then on setup leaves Claude to the plugin.
+
 ## First five minutes
 
 **Sessions.** Press `prefix+s`. Type to filter. Rows marked `live` run in a herdr pane right now; rows marked `job` are Claude Code background jobs. Enter on either jumps to the pane where it runs or is shown. Enter on anything else opens the session in a split. `Esc` switches from typing to keys: `o` or `v` split right, `d` split down, `t` new tab, `c` this pane, `i` paste the session's address into your pane. `s`, `a`, `r` jump between the search, ask, and replies panels. The jump and split keys are rebindable under `[keys]` in `~/.config/hsm/config.toml`.
@@ -104,6 +124,8 @@ agentmail setup | send <addr> "<text>" | inbox | wait | sessions | doctor
 ## Uninstall
 
 `herdr plugin uninstall herdr-session-manager`, then `agentmail setup` and untick everything before removing the binaries, so no hook entry points at a missing file.
+
+The Claude Code plugin goes with `/plugin uninstall agentmail@herdr-session-manager`. That removes its hooks and its downloaded binary too.
 
 ## License
 

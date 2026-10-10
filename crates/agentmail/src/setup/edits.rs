@@ -343,6 +343,36 @@ pub fn remove_mcp_json(content: &str, name: &str, path: &str) -> Result<String> 
     Ok(render(&map))
 }
 
+// ---- the agentmail Claude Code plugin ---------------------------------------
+
+/// Is the user-scope Claude Code plugin `id` (`<name>@<marketplace>`) switched on? Read
+/// from `~/.claude/settings.json` and `~/.claude/plugins/installed_plugins.json`.
+///
+/// The whole id, not the name: Anthropic's plugin directory lists an unrelated plugin
+/// that is also called `agentmail`. `enabledPlugins` is what Claude Code obeys, so an
+/// explicit `false` there wins over an install. An installed plugin without an entry
+/// still runs, because plugins default to enabled.
+pub fn claude_plugin_enabled(settings: &str, installed: &str, id: &str) -> bool {
+    let settings = parse_object(settings, "settings").unwrap_or_default();
+    if let Some(on) = settings
+        .get("enabledPlugins")
+        .and_then(|e| e.get(id))
+        .and_then(Value::as_bool)
+    {
+        return on;
+    }
+    let installed = parse_object(installed, "installed_plugins").unwrap_or_default();
+    installed
+        .get("plugins")
+        .and_then(|p| p.get(id))
+        .and_then(Value::as_array)
+        .is_some_and(|installs| {
+            installs
+                .iter()
+                .any(|i| i.get("scope").and_then(Value::as_str) == Some("user"))
+        })
+}
+
 // ---- Codex MCP registration (~/.codex/config.toml) --------------------------
 
 /// TOML is edited as text, not through a parser: `~/.codex/config.toml` is a hand-kept
@@ -921,5 +951,49 @@ followUpQueueMode = "queue"
             parsed["mcp_servers"]["agentmail"]["command"].as_str(),
             Some("/opt/we\"ird/agentmail")
         );
+    }
+
+    /// The shape of a real `~/.claude/plugins/installed_plugins.json`.
+    const INSTALLED: &str = r#"{
+  "version": 2,
+  "plugins": {
+    "rust-analyzer-lsp@claude-plugins-official": [
+      { "scope": "user", "installPath": "/Users/x/.claude/plugins/cache/claude-plugins-official/rust-analyzer-lsp/1.0.0", "version": "1.0.0" }
+    ],
+    "agentmail@herdr-session-manager": [
+      { "scope": "user", "installPath": "/Users/x/.claude/plugins/cache/herdr-session-manager/agentmail/0.1.2", "version": "0.1.2" }
+    ]
+  }
+}"#;
+
+    const ID: &str = "agentmail@herdr-session-manager";
+
+    #[test]
+    fn an_enabled_switch_counts() {
+        let settings = r#"{ "enabledPlugins": { "agentmail@herdr-session-manager": true } }"#;
+        assert!(claude_plugin_enabled(settings, "", ID));
+    }
+
+    #[test]
+    fn an_installed_plugin_without_a_switch_counts_as_enabled() {
+        assert!(claude_plugin_enabled(CLAUDE_SETTINGS, INSTALLED, ID));
+    }
+
+    #[test]
+    fn a_plugin_switched_off_does_not_count() {
+        let settings = r#"{ "enabledPlugins": { "agentmail@herdr-session-manager": false } }"#;
+        assert!(!claude_plugin_enabled(settings, INSTALLED, ID));
+    }
+
+    #[test]
+    fn another_marketplaces_agentmail_or_a_project_install_does_not_count() {
+        let other = r#"{ "enabledPlugins": { "agentmail@claude-plugins-official": true } }"#;
+        assert!(!claude_plugin_enabled(other, "", ID));
+        let project = INSTALLED.replace(
+            r#""scope": "user", "installPath": "/Users/x/.claude/plugins/cache/herdr"#,
+            r#""scope": "project", "installPath": "/Users/x/.claude/plugins/cache/herdr"#,
+        );
+        assert!(!claude_plugin_enabled("", &project, ID));
+        assert!(!claude_plugin_enabled("{broken", "{broken", ID));
     }
 }

@@ -1,0 +1,152 @@
+#!/bin/sh
+# agentmail launcher for the Claude Code plugin (macOS, Linux, and Git Bash on Windows).
+#
+# The plugin ships no binary. On the first run for a plugin version this downloads the
+# matching release asset for this platform into ${CLAUDE_PLUGIN_DATA}/bin/<version>/,
+# verifies it against the release's SHA256SUMS, and then execs it with our arguments.
+# Every later run is one file test and an exec.
+#
+# The data dir, not the plugin root: Claude Code replaces the root on every plugin
+# update, the data dir survives it. A version gets its own directory so an update never
+# overwrites a binary another session is still running (Windows refuses that outright).
+#
+# No build fallback: a platform without a release asset fails with a message instead.
+#
+# Overridable: AGENTMAIL_BIN (use this binary, skip the download),
+# AGENTMAIL_PLUGIN_VERSION (fetch this release instead of the plugin's version),
+# AGENTMAIL_REPO, AGENTMAIL_BASE_URL.
+set -u
+
+if [ -n "${AGENTMAIL_BIN:-}" ]; then
+  exec "$AGENTMAIL_BIN" "$@"
+fi
+
+repo="${AGENTMAIL_REPO:-umutciloglu/herdr-session-manager}"
+base_url="${AGENTMAIL_BASE_URL:-https://github.com/$repo/releases/download}"
+releases="https://github.com/$repo/releases"
+
+fail() {
+  echo "agentmail plugin: $1" >&2
+  exit 1
+}
+
+[ -n "${CLAUDE_PLUGIN_DATA:-}" ] || fail "CLAUDE_PLUGIN_DATA is not set; this launcher is meant to be run by Claude Code."
+
+# Our own location, not CLAUDE_PLUGIN_ROOT: that one is only set inside Claude Code,
+# and the manifest next to this script is the version this launcher belongs to.
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+manifest="$script_dir/../.claude-plugin/plugin.json"
+version="${AGENTMAIL_PLUGIN_VERSION:-}"
+if [ -z "$version" ]; then
+  version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | head -n 1)
+fi
+[ -n "$version" ] || fail "could not read the plugin version from $manifest"
+
+os=$(uname -s 2>/dev/null || echo unknown)
+arch=$(uname -m 2>/dev/null || echo unknown)
+triple=""
+ext=""
+case "$os" in
+  Darwin)
+    case "$arch" in
+      arm64|aarch64) triple="aarch64-apple-darwin" ;;
+      x86_64|amd64)  triple="x86_64-apple-darwin" ;;
+    esac
+    ;;
+  Linux)
+    case "$arch" in
+      x86_64|amd64)  triple="x86_64-unknown-linux-musl" ;;
+    esac
+    ;;
+  # Claude Code runs shell-form hooks through Git Bash on Windows.
+  MINGW*|MSYS*|CYGWIN*)
+    case "$arch" in
+      x86_64|amd64)  triple="x86_64-pc-windows-msvc"; ext=".exe" ;;
+    esac
+    ;;
+esac
+[ -n "$triple" ] || fail "no prebuilt agentmail for $os/$arch. Releases: $releases. Build it with \`cargo install --git https://github.com/$repo agentmail\` and set AGENTMAIL_BIN to the result."
+
+dir="$CLAUDE_PLUGIN_DATA/bin/$version"
+bin="$dir/agentmail$ext"
+
+# Only a verified binary is ever renamed into place, so existing means ready.
+[ -x "$bin" ] && exec "$bin" "$@"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+download() { # download <url> <dest>
+  if have curl; then
+    curl -fsSL -o "$2" "$1"
+  elif have wget; then
+    wget -q -O "$2" "$1"
+  else
+    fail "neither curl nor wget is available to download agentmail"
+  fi
+}
+
+sha256_of() {
+  if have sha256sum; then
+    sha256sum "$1" | awk '{print $1}'
+  elif have shasum; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
+mkdir -p "$dir" || fail "could not create $dir"
+
+# Two sessions starting together would both download. A noclobber redirect creates the
+# lock file with O_EXCL, so exactly one wins and the rest wait for it; agentmail.ps1
+# takes the same file the same way. A lock still held after a minute is treated as
+# left behind by a killed launcher: we go ahead anyway, which is safe because the
+# install itself is a rename of a verified file and never a partial write.
+lock="$dir/.lock"
+locked=0
+tries=0
+while ! (set -C; : > "$lock") 2>/dev/null; do
+  [ -x "$bin" ] && exec "$bin" "$@"
+  tries=$((tries + 1))
+  [ "$tries" -ge 60 ] && break
+  sleep 1
+done
+[ "$tries" -lt 60 ] && locked=1
+
+tmp=""
+cleanup() {
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  [ "$locked" = 1 ] && rm -f "$lock"
+  locked=0
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+
+# The winner may have finished between our last check and taking the lock.
+if [ -x "$bin" ]; then
+  cleanup
+  exec "$bin" "$@"
+fi
+
+asset="agentmail-$triple$ext"
+echo "agentmail plugin: downloading $asset v$version" >&2
+
+# Inside $dir, so the final mv is a rename on one filesystem and never a copy.
+tmp=$(mktemp -d "$dir/.download.XXXXXX") || fail "could not create a temp dir in $dir"
+download "$base_url/v$version/SHA256SUMS" "$tmp/SHA256SUMS" \
+  || fail "could not download SHA256SUMS for v$version. Releases: $releases"
+download "$base_url/v$version/$asset" "$tmp/$asset" \
+  || fail "no prebuilt $asset for v$version. Releases: $releases"
+
+# coreutils writes `hash  name`, binary mode writes `hash *name`; accept either.
+expected=$(grep -E "^[0-9a-f]{64} [ *]$asset\$" "$tmp/SHA256SUMS" | awk '{print $1}' | head -n 1)
+[ -n "$expected" ] || fail "no checksum listed for $asset in v$version"
+actual=$(sha256_of "$tmp/$asset") || fail "no sha-256 tool (sha256sum/shasum) available to verify agentmail"
+[ "$actual" = "$expected" ] || fail "checksum mismatch for $asset v$version; nothing was installed"
+
+chmod +x "$tmp/$asset"
+mv -f "$tmp/$asset" "$bin" || [ -x "$bin" ] || fail "could not install agentmail into $dir"
+echo "agentmail plugin: installed $asset v$version, verified SHA-256" >&2
+
+cleanup
+exec "$bin" "$@"

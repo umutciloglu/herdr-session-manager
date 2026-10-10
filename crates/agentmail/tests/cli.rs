@@ -94,6 +94,73 @@ fn setup_installs_into_a_temp_home_and_check_agrees() {
 }
 
 #[test]
+fn with_the_claude_plugin_enabled_setup_leaves_claude_to_it() {
+    let home = tempfile::tempdir().expect("home");
+    let state = tempfile::tempdir().expect("state");
+    let setup = |args: &[&str]| {
+        agentmail(home.path(), state.path())
+            .arg("setup")
+            .args(args)
+            .arg("--home")
+            .arg(home.path())
+            .stdin(Stdio::null())
+            .output()
+            .expect("run setup")
+    };
+
+    // Copies from before the plugin existed.
+    assert!(setup(&["--yes"]).status.success());
+
+    let settings_path = home.path().join(".claude/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&read(&settings_path)).expect("settings.json");
+    settings["enabledPlugins"] = serde_json::json!({ "agentmail@herdr-session-manager": true });
+    std::fs::write(&settings_path, settings.to_string()).expect("enable the plugin");
+
+    let check = setup(&["--check"]);
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "the old copies are duplicates"
+    );
+    let stdout = String::from_utf8_lossy(&check.stdout);
+    assert!(
+        stdout.contains("duplicate the Claude Code plugin"),
+        "{stdout}"
+    );
+
+    let fixed = setup(&["--yes"]);
+    assert!(fixed.status.success());
+    let stdout = String::from_utf8_lossy(&fixed.stdout);
+    assert!(
+        stdout.contains("removed Claude Stop hook (the plugin provides it)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "--dangerously-load-development-channels plugin:agentmail@herdr-session-manager"
+        ),
+        "the plugin's channel is named by plugin id: {stdout}"
+    );
+
+    let settings = read(&settings_path);
+    assert_eq!(hook_line(&settings, "Stop"), "", "{settings}");
+    assert_eq!(hook_line(&settings, "SessionStart"), "", "{settings}");
+    assert!(
+        settings.contains("agentmail@herdr-session-manager"),
+        "the plugin switch is left alone: {settings}"
+    );
+    let claude_json = read(&home.path().join(".claude.json"));
+    assert!(!claude_json.contains("\"agentmail\""), "{claude_json}");
+    assert!(
+        read(&home.path().join(".codex/hooks.json")).contains("hook codex-stop"),
+        "Codex keeps its own hooks"
+    );
+
+    assert_eq!(setup(&["--check"]).status.code(), Some(0));
+}
+
+#[test]
 fn a_message_queued_by_send_comes_back_out_of_the_stop_hook() {
     let home = tempfile::tempdir().expect("home");
     let state = tempfile::tempdir().expect("state");
