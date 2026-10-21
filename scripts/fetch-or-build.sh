@@ -119,11 +119,12 @@ fetch_prebuilt || build_from_source
 [ "${HSM_NO_PATH:-0}" = "1" ] && exit 0
 
 # --- put the binaries on PATH ---------------------------------------------------
-# Not symlinks: herdr builds a GitHub install inside a temporary checkout and moves
-# it into place afterwards, and it moves it again on update, so any path captured
-# here goes stale. Each launcher resolves the current plugin root when it runs:
-# the herdr-provided root inside plugin invocations, else the newest GitHub
-# install, else the directory this build ran in (the `plugin link` case).
+# Not symlinks: herdr 0.9.4+ builds every install and update in a fresh generation
+# directory and later deletes the old ones, and older herdr built in a temporary
+# checkout and moved it, so any path captured here goes stale. Each launcher
+# resolves the current plugin root when it runs: the herdr-provided root inside
+# plugin invocations, else the newest GitHub install, else the directory this
+# build ran in (the `plugin link` case).
 bin_dir="$HOME/.local/bin"
 mkdir -p "$bin_dir"
 for name in hsm agentmail; do
@@ -138,7 +139,10 @@ build_root="$repo_root"
 if [ -n "\${HERDR_PLUGIN_ROOT:-}" ] && [ -x "\$HERDR_PLUGIN_ROOT/target/release/\$name" ]; then
   exec "\$HERDR_PLUGIN_ROOT/target/release/\$name" "\$@"
 fi
-for root in \$(ls -dt "\${XDG_CONFIG_HOME:-\$HOME/.config}/herdr/plugins/github/herdr-session-manager-"* 2>/dev/null); do
+plugins="\${XDG_CONFIG_HOME:-\$HOME/.config}/herdr/plugins"
+# The generation layout first: herdr keeps a legacy github/ checkout around after
+# an upgrade, and that one is stale.
+for root in \$(ls -dt "\$plugins/github-installations/herdr-session-manager-"*/* 2>/dev/null) \$(ls -dt "\$plugins/github/herdr-session-manager-"* 2>/dev/null); do
   if [ -x "\$root/target/release/\$name" ]; then
     exec "\$root/target/release/\$name" "\$@"
   fi
