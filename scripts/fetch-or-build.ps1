@@ -107,8 +107,9 @@ if (-not (Get-Prebuilt)) { Build-FromSource }
 if ($env:HSM_NO_PATH -eq '1') { exit 0 }
 
 # --- put the binaries on PATH ---------------------------------------------------
-# Not the release directory itself: herdr builds a GitHub install inside a temporary
-# checkout and moves it into place afterwards, so $outDir is gone once this returns.
+# Not the release directory itself: herdr 0.9.4+ builds every install and update in a
+# fresh generation directory and later deletes the old ones, and older herdr built in
+# a temporary checkout and moved it, so $outDir goes stale.
 # Each launcher resolves the current plugin root when it runs: the herdr-provided root
 # inside plugin invocations, else the newest GitHub install, else the directory this
 # build ran in (the `plugin link` case).
@@ -136,10 +137,14 @@ setlocal
 set "name=$name"
 set "exe="
 set "plugins="
-if defined XDG_CONFIG_HOME set "plugins=%XDG_CONFIG_HOME%\herdr\plugins\github"
-if not defined plugins set "plugins=%APPDATA%\herdr\plugins\github"
+if defined XDG_CONFIG_HOME set "plugins=%XDG_CONFIG_HOME%\herdr\plugins"
+if not defined plugins set "plugins=%APPDATA%\herdr\plugins"
+set "installs=%plugins%\github-installations"
 if defined HERDR_PLUGIN_ROOT if exist "%HERDR_PLUGIN_ROOT%\target\release\%name%.exe" set "exe=%HERDR_PLUGIN_ROOT%\target\release\%name%.exe"
-if not defined exe for /f "delims=" %%d in ('dir /b /ad /o-d "%plugins%\herdr-session-manager-*" 2^>nul') do if not defined exe if exist "%plugins%\%%d\target\release\%name%.exe" set "exe=%plugins%\%%d\target\release\%name%.exe"
+rem The generation layout first: herdr keeps a legacy github\ checkout after an upgrade, and that one is stale.
+rem The plugin root is <generation>\checkout; a reclaimed generation has lost it.
+if not defined exe for /f "delims=" %%p in ('dir /b /ad /o-d "%installs%\herdr-session-manager-*" 2^>nul') do if not defined exe for /f "delims=" %%g in ('dir /b /ad /o-d "%installs%\%%p" 2^>nul') do if not defined exe if exist "%installs%\%%p\%%g\checkout\target\release\%name%.exe" set "exe=%installs%\%%p\%%g\checkout\target\release\%name%.exe"
+if not defined exe for /f "delims=" %%d in ('dir /b /ad /o-d "%plugins%\github\herdr-session-manager-*" 2^>nul') do if not defined exe if exist "%plugins%\github\%%d\target\release\%name%.exe" set "exe=%plugins%\github\%%d\target\release\%name%.exe"
 $buildRootLine
 if not defined exe goto missing
 "%exe%" %*
