@@ -141,8 +141,8 @@ if [ -n "\${HERDR_PLUGIN_ROOT:-}" ] && [ -x "\$HERDR_PLUGIN_ROOT/target/release/
 fi
 plugins="\${XDG_CONFIG_HOME:-\$HOME/.config}/herdr/plugins"
 # The generation layout first: herdr keeps a legacy github/ checkout around after
-# an upgrade, and that one is stale.
-for root in \$(ls -dt "\$plugins/github-installations/herdr-session-manager-"*/* 2>/dev/null) \$(ls -dt "\$plugins/github/herdr-session-manager-"* 2>/dev/null); do
+# an upgrade, and that one is stale. A reclaimed generation has lost its checkout/.
+for root in \$(ls -dt "\$plugins/github-installations/herdr-session-manager-"*/*/checkout 2>/dev/null) \$(ls -dt "\$plugins/github/herdr-session-manager-"* 2>/dev/null); do
   if [ -x "\$root/target/release/\$name" ]; then
     exec "\$root/target/release/\$name" "\$@"
   fi

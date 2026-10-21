@@ -157,16 +157,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # herdr 0.9.4+ builds each install in its own generation directory under
+          # herdr 0.9.4+ builds each install in <generation>\checkout under
           # github-installations\; older herdr kept one checkout under github\.
           $plugins = Join-Path $env:APPDATA 'herdr\plugins'
           $root = Get-ChildItem (Join-Path $plugins 'github-installations') -Directory -Filter 'herdr-session-manager-*' -ErrorAction SilentlyContinue |
-            Get-ChildItem -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            Get-ChildItem -Directory | Sort-Object LastWriteTime -Descending |
+            ForEach-Object { Join-Path $_.FullName 'checkout' } | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $root) {
-            $root = Get-ChildItem (Join-Path $plugins 'github') -Directory -Filter 'herdr-session-manager-*' -ErrorAction SilentlyContinue | Select-Object -First 1
+            $root = Get-ChildItem (Join-Path $plugins 'github') -Directory -Filter 'herdr-session-manager-*' -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
           }
           if (-not $root) { throw 'no plugin install under %APPDATA%\herdr\plugins' }
-          $release = Join-Path $root.FullName 'target\release'
+          $release = Join-Path $root 'target\release'
           & (Join-Path $release 'hsm.exe') --version
           & (Join-Path $release 'agentmail.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'agentmail.exe did not run' }

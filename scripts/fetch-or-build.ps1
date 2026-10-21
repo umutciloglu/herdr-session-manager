@@ -142,7 +142,8 @@ if not defined plugins set "plugins=%APPDATA%\herdr\plugins"
 set "installs=%plugins%\github-installations"
 if defined HERDR_PLUGIN_ROOT if exist "%HERDR_PLUGIN_ROOT%\target\release\%name%.exe" set "exe=%HERDR_PLUGIN_ROOT%\target\release\%name%.exe"
 rem The generation layout first: herdr keeps a legacy github\ checkout after an upgrade, and that one is stale.
-if not defined exe for /f "delims=" %%p in ('dir /b /ad /o-d "%installs%\herdr-session-manager-*" 2^>nul') do if not defined exe for /f "delims=" %%g in ('dir /b /ad /o-d "%installs%\%%p" 2^>nul') do if not defined exe if exist "%installs%\%%p\%%g\target\release\%name%.exe" set "exe=%installs%\%%p\%%g\target\release\%name%.exe"
+rem The plugin root is <generation>\checkout; a reclaimed generation has lost it.
+if not defined exe for /f "delims=" %%p in ('dir /b /ad /o-d "%installs%\herdr-session-manager-*" 2^>nul') do if not defined exe for /f "delims=" %%g in ('dir /b /ad /o-d "%installs%\%%p" 2^>nul') do if not defined exe if exist "%installs%\%%p\%%g\checkout\target\release\%name%.exe" set "exe=%installs%\%%p\%%g\checkout\target\release\%name%.exe"
 if not defined exe for /f "delims=" %%d in ('dir /b /ad /o-d "%plugins%\github\herdr-session-manager-*" 2^>nul') do if not defined exe if exist "%plugins%\github\%%d\target\release\%name%.exe" set "exe=%plugins%\github\%%d\target\release\%name%.exe"
 $buildRootLine
 if not defined exe goto missing
