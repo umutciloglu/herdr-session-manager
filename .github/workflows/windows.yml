@@ -41,7 +41,7 @@ jobs:
         shell: powershell
         run: |
           $failed = $false
-          foreach ($file in Get-ChildItem scripts -Filter *.ps1) {
+          foreach ($file in Get-ChildItem scripts, claude-plugin/agentmail/scripts -Filter *.ps1) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
             if ($errors) { $errors | ForEach-Object { Write-Host "$($file.Name): $_" }; $failed = $true }

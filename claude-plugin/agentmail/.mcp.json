@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agentmail": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/agentmail",
+      "args": ["mcp"]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "herdr-session-manager",
+  "owner": {
+    "name": "Umut Çiloğlu",
+    "url": "https://github.com/umutciloglu"
+  },
+  "metadata": {
+    "description": "Claude Code plugins from herdr-session-manager."
+  },
+  "plugins": [
+    {
+      "name": "agentmail",
+      "source": "./claude-plugin/agentmail",
+      "description": "Agent-to-agent mail between Claude Code, Codex and other sessions: MCP server plus Stop and SessionStart hooks.",
+      "category": "productivity"
+    }
+  ]
+}
